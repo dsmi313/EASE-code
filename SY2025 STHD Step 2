@@ -1,0 +1,735 @@
+##DATA PREP
+
+#load packages:
+library(escapeLGD)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+#library(devtools)
+#devtools::install_github("delomast/escapeLGD")
+
+#steelhead example, but some places might have CHNK and STHD
+setwd("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs")
+#_________________________
+### 1) DEFINE START AND END DATES OF THE ANALYSIS
+sy <- 2025
+spp <- "STHD"
+if(spp == "STHD"){
+  start <- mdy(paste0("7/1/", sy - 1)) #STHD dates are from 7/1/24 - 6/30/25
+  end <- mdy(paste0("6/30/", sy))
+} else {
+  start <- mdy(paste0("3/1/", sy)) #CHNK dates are from 3/1 - 8/17/25
+  end <- mdy(paste0("8/17/", sy))
+}
+
+
+# QAQC PBT tag rates ------------------------------------------------------
+tagRates <- read.csv('C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD.Rgroup_TagRates.csv') %>% distinct() %>%
+  setNames(c("group", "tagRate")) %>%
+  mutate(tagRate = as.numeric(tagRate)) %>%
+  filter(tagRate > 0, !is.na(tagRate))
+
+tagRates <- tagRates %>%
+  add_row(group = "Unassigned", tagRate = 1)
+
+summary(tagRates$tagRate) #should be >0 and at most 1; no NAs
+
+# this should be TRUE, otherwise you have duplicates
+n_distinct(tagRates$group) == nrow(tagRates) #ok
+
+#CHECK THAT ALL ASSIGNED PBT SAMPLES (in trap dataset) HAVE DEFINED TAG RATES
+trap<-read.csv('C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_trap.csv')
+
+# should have 0 rows
+trap %>% count(releaseGroup) %>% left_join(tagRates, by = c("releaseGroup" = "group")) %>%
+  mutate(tagRate = as.numeric(tagRate)) %>%
+  filter(is.na(tagRate), !is.na(releaseGroup), releaseGroup != "Unassigned") #ok
+
+write.csv(tagRates, 'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_tagRates.csv',row.names = F)
+
+
+# Format PIT-tag data -----------------------------------------------------
+pitData <- read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_PITdata_lgr_night_reasc_daily.csv")
+
+#This data has been filtered/processed to have one row for every unique ascension not unique fish.
+#Some cols defined:
+#1-The stock group (upper or lower for steelhead) the PIT tag belongs to for purposes of fallback rates
+#2-The date the ascension occurred
+#3-The tagID
+#4-The time period, day (counting window open) or night (window closed), the ascension occurred
+#5-Whether this ascension resulted in a later fall back (TRUE) or
+#not (FALSE). In other words TRUE if the fish later re-ascended, and
+#FALSE if it did not. Note that because we are running this model without
+#accounting for fallback withOUT reascension, this column could also
+#represent whether the PIT tag had previously ascended (TRUE) or not (FALSE)
+
+#Let's make sure the period column only includes D or N (no NAs) and laterAscend only includes TRUE or FALSE (no NAs).
+pitData %>% count(Period) #ok
+pitData %>% count(laterAscend)#ok
+head(pitData$Date)
+pitData <- pitData %>% mutate(Date = ymd(Date))
+
+# Load the date-week mapping file
+date_week_map <- read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD.dates.with.weekNums.csv")
+
+# Convert Date columns to Date format in both files
+date_week_map$Date <- as.Date(date_week_map$Date)
+pitData$Date <- ymd(pitData$Date)  # Use ymd since your dates are YYYY-MM-DD
+
+# Join to add weekNum column to pitData
+pitData <- pitData %>%
+  left_join(date_week_map %>% select(Date, weekNum), by = "Date")
+
+# Rename weekNum to sWeek (as required by EASE)
+colnames(pitData)[which(names(pitData) == "weekNum")] <- "sWeek"
+
+#12/3/22 CMB - create sWeek column if haven't done already:
+pitData <- pitData %>% mutate(y = year(Date), w = sWeek) %>%
+  arrange(y, w) %>% mutate(sWeek = paste0(y, "_", sprintf("%02d", w)))
+
+# fallback - creating another data frame from pitData that has sums of reascends and total passes per statistical week.
+fullRe <- pitData %>%
+  group_by(stockGroup, sWeek) %>%
+  summarise(totalPass = length(TagID), numReascend = sum(laterAscend), .groups = "drop") %>%
+  select(sWeek, stockGroup, numReascend, totalPass)
+
+fullNi <- pitData %>%
+  group_by(sWeek) %>%
+  summarise(totalPass = length(TagID), nightPass = sum(Period == "N"), .groups = "drop") %>%
+  select(sWeek, nightPass, totalPass)
+
+
+#make sure there is a wc entry for every statistical week and stock group for the fallback input, even if it's 0. We'll do that using
+#the window count data as it has all statistical weeks in it.
+
+#read in final window count input file
+wc<-read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_wc_unexpanded.csv")
+
+# Ensure wc sWeek is zero-padded
+wc <- wc %>%
+  separate(sWeek, into = c("year", "week"), sep = "_", remove = FALSE) %>%
+  mutate(sWeek = paste0(year, "_", sprintf("%02d", as.numeric(week)))) %>%
+  select(sWeek, wc)
+
+fullReComplete <- tibble()
+for(g in unique(fullRe$stockGroup)){
+  fullReComplete <- fullReComplete %>% bind_rows(
+    wc %>% full_join(fullRe %>% filter(stockGroup == g), by = "sWeek") %>%
+      mutate(across(c(numReascend, totalPass), ~replace_na(., 0)))%>%
+    mutate(stockGroup = replace_na(stockGroup, g))
+  )
+}
+# should be 0. IF NOT, you have PIT tagged fish passing when window counts aren't in wc
+sum(is.na(fullReComplete$wc))#ok
+
+#columns you need
+fullReComplete <- fullReComplete %>% select(-wc)
+write.csv(fullReComplete, "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_fallback_fullReComplete.csv",row.names = F)
+
+fullNiComplete <- wc %>% full_join(fullNi, by = "sWeek") %>%
+  mutate(across(c(nightPass, totalPass), replace_na, 0))
+
+# should be 0, if not you have PIT tagged fish passing when window counts aren't in wc
+sum(is.na(fullNiComplete$wc)) #ok
+
+fullNiComplete <- fullNiComplete %>% select(-wc)
+write.csv(fullNiComplete, "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_night_fullNiComplete.csv",row.names = F)
+
+
+# Format GSI data ---------------------------------------------------------
+# Load GSI draws from EFGL
+gsiDraws <- read_tsv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/OmyLGRU25S_gsiDraws_final.txt")
+
+# Find which trap fish are missing from gsiDraws
+trap_ids <- trap$MasterID
+gsi_ids <- gsiDraws$MasterID
+missing_ids <- setdiff(trap_ids, gsi_ids)
+
+cat("Total trap fish:", nrow(trap), "\n")
+cat("Genotyped fish:", nrow(gsiDraws), "\n")
+cat("Missing fish to add:", length(missing_ids), "\n")
+
+# Create rows for missing fish with NA for all boot columns
+missing_fish <- tibble(
+  MasterID = missing_ids,
+  !!!setNames(rep(list(NA_character_), 2000), paste0("boot_", 1:2000))
+)
+
+# Combine with existing gsiDraws
+gsiDraws <- bind_rows(gsiDraws, missing_fish)
+
+# Verify
+if(nrow(gsiDraws) == nrow(trap) && sum(!trap$MasterID %in% gsiDraws$MasterID) == 0) {
+  cat("✓ Success! All", nrow(trap), "trap fish are now in gsiDraws\n")
+} else {
+  cat("✗ Error: Check your data\n")
+}
+
+# these should both be 0
+sum(!trap$MasterID %in% gsiDraws$MasterID)#ok
+sum(!gsiDraws$MasterID %in% trap$MasterID)#ok
+
+#And let's look at just the first iterations values
+trap %>% mutate(gsiAssignment = gsiDraws[match(MasterID, gsiDraws[[1]]),][[2]]) %>%
+  count(LGDMarkAD, gsiAssignment)
+
+# Check if AI fish have biosamples and GSI data
+trap %>%
+  filter(LGDMarkAD == "AI") %>%
+  mutate(has_gsi = MasterID %in% gsiDraws$MasterID[!is.na(gsiDraws$boot_1)]) %>%
+  count(BiosamplesID_present = !is.na(BioSamplesID), has_gsi)
+
+
+
+# Automatic Composition Strata Assignment --------------------------------
+# Create weekly summary with all needed info
+library(dplyr)
+library(ggplot2)
+
+# Weekly summary
+weekly_summary <- trap %>%
+  group_by(sWeek) %>%
+  summarise(
+    total = n(),
+    AD = sum(LGDMarkAD == "AD"),
+    AI = sum(LGDMarkAD == "AI"),
+    AD_genotyped = sum(LGDMarkAD == "AD" & !is.na(releaseGroup)),
+    AI_genotyped = sum(LGDMarkAD == "AI" & !is.na(releaseGroup)),
+    knownHN = sum(LGDMarkAD == "AI" & (physTag | (!is.na(releaseGroup) & releaseGroup != "Unassigned")))
+  ) %>%
+  left_join(wc, by = "sWeek") %>%
+  arrange(sWeek)
+
+# Generate full list of weeks for spawn year (2024_27 through 2025_26 for STHD)
+# STHD spans two calendar years
+all_weeks <- tibble(
+  sWeek = c(
+    sprintf("2024_%02d", 27:53),  # July-Dec 2024
+    sprintf("2025_%02d", 1:26)    # Jan-June 2025
+  )
+)
+
+# Join existing data to it, fill missing with 0
+weekly_summary <- all_weeks %>%
+  left_join(weekly_summary, by = "sWeek") %>%
+  mutate(across(where(is.numeric), ~ replace_na(., 0)))
+
+target <- 100  # Target number of genotyped AI fish per stratum
+
+strat <- weekly_summary %>%
+  arrange(sWeek) %>%
+  mutate(
+    # Calculate running total of genotyped AI fish
+    csum = cumsum(AI_genotyped),
+
+    # Divide cumsum by target and round up to assign initial strata
+    stratum_raw = ceiling(csum / target),
+
+    # Ensure no stratum 0 (happens when early weeks have 0 fish)
+    stratum_raw = ifelse(stratum_raw < 1, 1, stratum_raw),
+
+    # Remove gaps in stratum numbers
+    stratum = dense_rank(stratum_raw)
+  )
+
+# Summarize final strata
+strat %>%
+  group_by(stratum) %>%
+  summarise(
+    n_weeks = n(),
+    first_week = first(sWeek),
+    last_week = last(sWeek),
+    genotyped_AI = sum(AI_genotyped)
+  )
+
+# Visualize strata
+ggplot(strat, aes(x = sWeek, y = AI_genotyped, fill = factor(stratum))) +
+  geom_col() +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(
+    title = "Genotyped AI fish by week and stratum (SY2025 STHD)",
+    x = "Statistical Week",
+    y = "Genotyped AI fish",
+    fill = "Stratum"
+  ) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "red")
+
+
+# Problem Fish Detection (uses Age for STHD) -----------------------------
+gsi_draws_NA_probfish <- gsiDraws # create a copy
+
+# Use strat for composition strata
+stratComp <- strat %>%
+  select(sWeek, wc, AD, AI, knownHN, AD_genotyped, AI_genotyped, stratum) %>%
+  rename(knownHNC = knownHN)
+
+# Get AI wild fish with GSI assignments and their strata/Age
+tempdata <- trap %>%
+  left_join(stratComp, by = "sWeek") %>%
+  filter(LGDMarkAD == "AI") %>%
+  filter(!is.na(GenStock)) %>%
+  select(MasterID, stratum, Age, GenStock) %>%
+  inner_join(gsiDraws %>% filter(!is.na(.[[2]])), by = "MasterID") %>%
+  select(MasterID, stratum, Age, everything())
+
+# Find problem fish
+problemIterations <- tibble()
+
+for(i in 4:ncol(tempdata)) {
+
+  # All stock-stratum combinations in this iteration
+  GSIcombos <- tempdata[, c(2, i)] %>% distinct()
+
+  # Stock-stratum combinations that HAVE fish with Age
+  GSI_AgeCombos <- tempdata[, c(2, 3, i)] %>%
+    filter(!is.na(Age)) %>%
+    select(-Age) %>%
+    distinct()
+
+  # Find combos that exist but have no fish with Age
+  probCases <- GSIcombos %>%
+    anti_join(GSI_AgeCombos, by = c("stratum", colnames(tempdata)[i]))
+
+  if(nrow(probCases) < 1) next
+
+  # Add problem fish from this iteration
+  problemIterations <- problemIterations %>%
+    bind_rows(
+      tempdata %>%
+        semi_join(probCases, by = c("stratum", colnames(tempdata)[i])) %>%
+        select(MasterID, stratum) %>%
+        mutate(iteration = i)
+    )
+}
+
+# Set GSI to NA for problem fish
+if(nrow(problemIterations) > 0) {
+  problemMasterIDs <- problemIterations %>%
+    select(MasterID, stratum) %>%
+    distinct()
+
+  problemfishlist <- problemMasterIDs %>% pull(MasterID)
+
+  gsi_draws_NA_probfish[
+    gsi_draws_NA_probfish$MasterID %in% problemfishlist,
+    2:ncol(gsi_draws_NA_probfish)
+  ] <- NA
+
+  message("Set ", length(problemfishlist), " problem fish to NA")
+  print(problemMasterIDs)
+} else {
+  message("No problem cases found - all GSI/stratum combos have fish with Age")
+}
+
+write.csv(strat,'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_trap.strata.csv',row.names = F)
+write.csv(gsiDraws,'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_gsiDraws.csv',row.names = F)
+write.csv(gsi_draws_NA_probfish,'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_gsiDraws_NA_probfish.csv',row.names = F)
+
+
+# Automatic Night Passage Strata -----------------------------------------
+# Fix sWeek formatting in fullNiComplete to match trap data (zero-padded)
+fullNiComplete <- fullNiComplete %>%
+  mutate(
+    week_num = as.numeric(sub(".*_", "", sWeek)),
+    year = as.numeric(sub("_.*", "", sWeek)),
+    sWeek = paste0(year, "_", sprintf("%02d", week_num))
+  ) %>%
+  select(-week_num, -year)
+
+night_summary <- fullNiComplete %>%
+  group_by(sWeek) %>%
+  summarise(
+    nightPass = sum(nightPass),
+    totalPass = sum(totalPass),
+    pct_night = round(100 * nightPass / totalPass, 1)
+  ) %>%
+  arrange(sWeek)
+
+print(night_summary, n = Inf)
+
+# Create strata that avoid 0% or 100% night passage
+target_n <- 100  # Target ascensions per stratum
+
+stratNight <- night_summary %>%
+  filter(totalPass > 0) %>%  # Remove weeks with no ascensions
+  arrange(sWeek) %>%
+  mutate(
+    # Calculate running total of ascensions
+    csum = cumsum(totalPass),
+
+    # Initial stratum assignment based on target
+    stratum_raw = ceiling(csum / target_n),
+    stratum = dense_rank(stratum_raw)
+  )
+
+# Check each stratum for 0% or 100% night passage and fix
+for(s in rev(unique(stratNight$stratum))) {
+  strat_data <- stratNight %>% filter(stratum == s)
+  total_n <- sum(strat_data$nightPass)
+  total_a <- sum(strat_data$totalPass)
+  pct <- ifelse(total_a > 0, total_n / total_a, 0)
+
+  # If stratum has 0% or 100%, merge backward (or forward if stratum 1)
+  if(pct == 0 | pct == 1) {
+    if(s == 1) {
+      stratNight <- stratNight %>%
+        mutate(stratum = ifelse(stratum == 1, 2, stratum))
+    } else {
+      stratNight <- stratNight %>%
+        mutate(stratum = ifelse(stratum == s, s - 1, stratum))
+    }
+  }
+}
+
+# Re-number strata to be consecutive
+stratNight <- stratNight %>%
+  mutate(stratum = dense_rank(stratum))
+
+# Check strata quality
+weekly_range <- stratNight %>%
+  group_by(stratum) %>%
+  summarise(
+    min_pct = min(pct_night, na.rm = TRUE),
+    max_pct = max(pct_night, na.rm = TRUE)
+  )
+
+strata_check <- stratNight %>%
+  group_by(stratum) %>%
+  summarise(
+    n_weeks = n(),
+    first_week = first(sWeek),
+    last_week = last(sWeek),
+    total_ascensions = sum(totalPass),
+    total_night = sum(nightPass),
+    pct_night = round(100 * total_night / total_ascensions, 1)
+  ) %>%
+  left_join(weekly_range, by = "stratum")
+
+print(strata_check)
+
+# Final format - match BUILD template with all weeks
+stratNight_final <- all_weeks %>%
+  left_join(stratNight %>% select(sWeek, nightPass, totalPass, pct_night, csum, stratum),
+            by = "sWeek") %>%
+  fill(stratum, .direction = "down") %>%
+  mutate(
+    stratum = ifelse(is.na(stratum), 1, stratum),
+    nightPass = ifelse(is.na(nightPass), 0, nightPass),
+    totalPass = ifelse(is.na(totalPass), 0, totalPass),
+    pct_night = ifelse(is.na(pct_night), 0, pct_night),
+    csum = ifelse(is.na(csum), 0, csum)
+  )
+
+# Export
+stratNight_export <- stratNight_final %>%
+  select(sWeek, nightPass, totalPass, pct_night, csum, stratum)
+
+write.csv(stratNight_export, "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/BUILD_stratNight_SY2025STHD_full.csv", row.names = FALSE)
+write.csv(stratNight_final %>% select(sWeek, stratum),
+          "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/BUILD_stratNight_SY2025STHD.csv", row.names = FALSE)
+
+stratNight <- read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/BUILD_stratNight_SY2025STHD.csv")
+
+
+# Automatic Fallback Strata (handles upper & lower stocks) ---------------
+# Load composition strata
+stratComp <- strat %>%
+  select(sWeek, stratum)
+
+# Fallback = composition for each stock group
+stratFallback <- fullReComplete %>%
+  left_join(stratComp %>% rename(compStratum = stratum), by = "sWeek") %>%
+  mutate(stratum = ifelse(is.na(compStratum), min(stratComp$stratum, na.rm = TRUE), compStratum)) %>%
+  select(stockGroup, sWeek, stratum)
+
+# Check compatibility
+library(escapeLGD)
+checkStrata(stratAssign_comp = stratComp, stratAssign_fallback = stratFallback)
+
+# Evaluate by stock group
+eval <- stratFallback %>%
+  left_join(fullReComplete, by = c("stockGroup", "sWeek")) %>%
+  filter(totalPass > 0) %>%
+  group_by(stockGroup, stratum) %>%
+  summarise(
+    weeks = paste(range(sWeek), collapse = " to "),
+    numReascend = sum(numReascend),
+    totalPass = sum(totalPass),
+    .groups = "drop"
+  )
+
+eval %>% mutate(noVar = numReascend == 0 | numReascend == totalPass)
+
+# Verify
+checkStrata(stratAssign_comp = stratComp, stratAssign_fallback = stratFallback)
+
+# Must have at least 1 totalPass
+if(any(eval$totalPass < 1)) print("ERROR: strata not acceptable, must have 1+ totalPass")
+
+print(eval)
+
+write.csv(stratFallback, 'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_stratFallback.csv', row.names = FALSE)
+
+
+# Comprehensive Strata Summaries ------------------------------------------
+
+# 1. COMPOSITION STRATA SUMMARY
+comp_summary <- strat %>%
+  group_by(stratum) %>%
+  summarise(
+    weeks = paste(range(sWeek), collapse = " to "),
+    n_weeks = n(),
+    total_fish = sum(total, na.rm = TRUE),
+    AD_count = sum(AD, na.rm = TRUE),
+    AI_count = sum(AI, na.rm = TRUE),
+    AD_genotyped = sum(AD_genotyped, na.rm = TRUE),
+    AI_genotyped = sum(AI_genotyped, na.rm = TRUE),
+    knownHN = sum(knownHN, na.rm = TRUE),
+    total_wc = sum(wc, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2. FALLBACK STRATA SUMMARY (both stock groups)
+fallback_summary <- stratFallback %>%
+  left_join(fullReComplete, by = c("stockGroup", "sWeek")) %>%
+  group_by(stockGroup, stratum) %>%
+  summarise(
+    weeks = paste(range(sWeek), collapse = " to "),
+    n_weeks = n(),
+    numReascend = sum(numReascend, na.rm = TRUE),
+    totalPass = sum(totalPass, na.rm = TRUE),
+    fallback_rate = round(numReascend / totalPass, 4),
+    .groups = "drop"
+  )
+
+# 3. NIGHTTIME PASSAGE STRATA SUMMARY
+night_summary_full <- stratNight %>%
+  left_join(fullNiComplete, by = "sWeek") %>%
+  group_by(stratum) %>%
+  summarise(
+    weeks = paste(range(sWeek), collapse = " to "),
+    n_weeks = n(),
+    nightPass = sum(nightPass, na.rm = TRUE),
+    totalPass = sum(totalPass, na.rm = TRUE),
+    night_rate = round(nightPass / totalPass, 4),
+    .groups = "drop"
+  )
+
+# Weekly detail for composition
+comp_weekly <- strat %>%
+  select(sWeek, stratum, total, AD, AI, AD_genotyped, AI_genotyped, knownHN, wc)
+
+# Weekly detail for fallback (both stock groups)
+fallback_weekly <- stratFallback %>%
+  left_join(fullReComplete, by = c("stockGroup", "sWeek")) %>%
+  mutate(fallback_rate = round(numReascend / totalPass, 4)) %>%
+  select(stockGroup, sWeek, stratum, numReascend, totalPass, fallback_rate)
+
+# Weekly detail for night
+night_weekly <- stratNight %>%
+  left_join(fullNiComplete, by = "sWeek") %>%
+  mutate(night_rate = round(nightPass / totalPass, 4)) %>%
+  select(sWeek, stratum, nightPass, totalPass, night_rate)
+
+# Export summaries
+write.csv(comp_summary, "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025_STHD_trap_strata_SUMMARY.csv", row.names = FALSE)
+write.csv(fallback_summary, "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025_STHD_fallback_strata_SUMMARY.csv", row.names = FALSE)
+write.csv(night_summary_full, "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025_STHD_night_strata_SUMMARY.csv", row.names = FALSE)
+
+# Export weekly detail
+write.csv(comp_weekly, "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025_STHD_trap_strata_WEEKLY.csv", row.names = FALSE)
+write.csv(fallback_weekly, "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025_STHD_fallback_strata_WEEKLY.csv", row.names = FALSE)
+write.csv(night_weekly, "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025_STHD_night_strata_WEEKLY.csv", row.names = FALSE)
+
+# View summaries
+comp_summary
+fallback_summary
+night_summary_full
+
+
+# Comparison Visualization with SY2024 ------------------------------------
+# Example with last year's data (update with actual SY2024 values)
+library(tibble)
+
+# You can update these with actual SY2024 values
+eval_lastyear <- tribble(
+  ~stratum, ~wc, ~AD, ~AI, ~knownHNC, ~AD_genotyped, ~AI_genotyped,
+  1, 1389, 157, 268, 5, 47, 266,
+  2, 1503, 650, 553, 20, 68, 551,
+  3, 1881, 294, 153, 13, 146, 153,
+  4, 4912, 851, 431, 48, 425, 431,
+  5, 4949, 905, 388, 78, 487, 388,
+  6, 3857, 689, 280, 67, 394, 280,
+  7, 2838, 521, 228, 65, 324, 228,
+  8, 2220, 402, 215, 67, 254, 214,
+  9, 1517, 253, 138, 35, 147, 137,
+  10, 1765, 107, 61, 22, 59, 60,
+  11, 1846, 162, 89, 32, 80, 86
+)
+
+# Prepare data for comparison
+eval_2025 <- comp_summary %>%
+  select(stratum, AI_genotyped, total_wc) %>%
+  mutate(year = 2025) %>%
+  rename(wc = total_wc)
+
+eval_2024 <- eval_lastyear %>%
+  mutate(year = 2024) %>%
+  select(year, stratum, AI_genotyped, wc)
+
+eval_comp <- bind_rows(eval_2025, eval_2024)
+
+# Create scaling factor
+scaleFactor <- max(eval_comp$wc) / max(eval_comp$AI_genotyped)
+
+ggplot(eval_comp, aes(x = factor(stratum))) +
+  # Bars for AI_genotyped
+  geom_col(aes(y = AI_genotyped, fill = factor(year)),
+           position = position_dodge(width = 0.8), width = 0.7) +
+
+  # Line for window counts (scaled)
+  geom_line(aes(y = wc / scaleFactor, group = factor(year), color = factor(year)),
+            size = 1.2, linetype = "solid") +
+  geom_point(aes(y = wc / scaleFactor, color = factor(year)), size = 2) +
+
+  # Formatting
+  theme_minimal(base_size = 13) +
+  scale_y_continuous(
+    name = "AI Genotyped Fish",
+    sec.axis = sec_axis(~ . * scaleFactor, name = "Window Count (wc)")
+  ) +
+  scale_fill_manual(values = c("tomato", "steelblue")) +
+  scale_color_manual(values = c("tomato3", "steelblue4")) +
+  labs(
+    title = "AI Genotyped Fish and Window Counts by Stratum (STHD)",
+    x = "Stratum",
+    fill = "Year (AI Genotyped)",
+    color = "Year (Window Count)"
+  ) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "red") +
+  annotate("text", x = Inf, y = 100, label = "Target = 100",
+           hjust = 1.1, vjust = -0.4, color = "red", size = 3) +
+  theme(
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 0),
+    plot.title = element_text(face = "bold"),
+    legend.position = "bottom"
+  )
+
+
+# SCOBI Export ------------------------------------------------------------
+library(tidyverse)
+
+# Get rid of question marks in ages
+trap <- trap %>% filter(is.na(swAge) | swAge != "?")
+
+trap_scobi <- trap %>%
+  dplyr::mutate(
+    CalenderYear = year(CollectionDate),
+    BioScaleFinalAge = BioScaleFinalAge.1,
+    GenPBT_ByHatGenPBT_RGroup = releaseGroup
+  ) %>%
+  dplyr::select(
+    MasterID,
+    SpawnYear,
+    CollectionDate,
+    sWeek,
+    CalenderYear,
+    WeekNumber,
+    LGDSpecies,
+    LGDFLmm,
+    SRR,
+    LGDMarkAD,
+    physTag,
+    GenMa,
+    GenPa,
+    PBTBYHat,
+    PBTRGroup,
+    Rear,
+    GenSex,
+    GenStock,
+    MPG,
+    BioScaleFinalAge,
+    fwAge,
+    swAge,
+    Age,
+    totalAge,
+    BY,
+    GenPBT_ByHatGenPBT_RGroup,
+    lenCat,
+    LGDTagsAll,
+    PtagisFlags
+  )
+
+str(trap_scobi)
+write.csv(trap_scobi, "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_trap_forSCOBI.csv", row.names = FALSE)
+
+wc_scobi <- comp_weekly %>%
+  mutate(
+    Strata = as.numeric(str_extract(sWeek, "(?<=_)[0-9]+")),
+    Count = round(wc / (5/6), digits=0),
+    Collapse = stratum
+  ) %>%
+  select(Strata, Count, Collapse)
+
+write.csv(wc_scobi, "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_wc_forSCOBI.csv", row.names = FALSE)
+
+tagRates_scobi <- tagRates %>%
+  dplyr::rename(
+    PBT_RELEASE_GROUP = group,
+    PBT_RELEASE_GROUP_TAGRATE = tagRate
+  )
+
+write.csv(tagRates_scobi,
+          "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_tagRates_forSCOBI.csv",
+          row.names = FALSE)
+
+# Verify SCOBI files
+str(read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_trap_forSCOBI.csv"))
+str(read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_wc_forSCOBI.csv"))
+str(read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_tagRates_forSCOBI.csv"))
+
+trap2 <- read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_trap_forSCOBI.csv")
+tags2 <- read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_tagRates_forSCOBI.csv")
+
+setdiff(unique(trap2$GenPBT_RGroup), tags2$PBT_RELEASE_GROUP)
+
+
+# Save Final Inputs -------------------------------------------------------
+# Write final strata
+stratComp <- strat %>% select(sWeek, stratum)
+write.csv(stratComp,'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_Comp.strata.csv',row.names = F)
+write.csv(stratNight, 'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_stratNight.csv', row.names = FALSE)
+
+# Clean up any rogue row name columns
+if("X" %in% colnames(fullReComplete)) fullReComplete <- fullReComplete %>% select(-X)
+if("X" %in% colnames(fullNiComplete)) fullNiComplete <- fullNiComplete %>% select(-X)
+if("X" %in% colnames(wc)) wc <- wc %>% select(-X)
+
+# Re-save all CSVs without row names
+write.csv(trap, 'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_trap.csv', row.names = FALSE)
+write.csv(wc, 'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_wc_unexpanded.csv', row.names = FALSE)
+write.csv(tagRates, 'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_PBTtagRates.csv', row.names = FALSE)
+write.csv(fullReComplete, 'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_fallback_fullReComplete.csv', row.names = FALSE)
+write.csv(fullNiComplete, 'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_night_fullNiComplete.csv', row.names = FALSE)
+write.csv(gsi_draws_NA_probfish, 'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_gsiDraws_NA_probfish.csv', row.names = FALSE)
+write.csv(stratComp, 'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_Comp.strata.csv', row.names = FALSE)
+write.csv(stratFallback, 'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_stratFallback.csv', row.names = FALSE)
+write.csv(stratNight, 'C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_stratNight.csv', row.names = FALSE)
+
+# Read them all back in clean
+trap <- read.csv('C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_trap.csv')
+wc <- read.csv('C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_wc_unexpanded.csv')
+tagRates <- read.csv('C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_PBTtagRates.csv')
+fullNiComplete <- read.csv('C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_night_fullNiComplete.csv')
+fullReComplete <- read.csv('C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_fallback_fullReComplete.csv')
+gsi_draws_NA_probfish <- read.csv('C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_gsiDraws_NA_probfish.csv')
+stratComp <- read.csv('C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_Comp.strata.csv')
+stratFallback <- read.csv('C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_stratFallback.csv')
+stratNight <- read.csv('C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_stratNight.csv')
+
+# Save final .rda file
+save(trap, wc, tagRates, fullNiComplete, fullReComplete, gsi_draws_NA_probfish,
+     stratComp, stratFallback, stratNight,
+     file = paste0("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/escapeLGD_FINAL INPUTS_", spp, "_", sy, ".rda"))
