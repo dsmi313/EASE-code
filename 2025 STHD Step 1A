@@ -374,14 +374,14 @@ Step 4: Total fish is = between datasets
 #can write code to sum NA's in formatted data
 
 ### Remove fish with uncertain ages
-Fish with uncertain ages (containing "?") are removed from the dataset to ensure age calculations are reliable.
+Fish with uncertain ages (containing "?" in fw or sw age) are removed from the dataset to ensure age calculations are reliable.
 ```{r}
 # Count fish before removing uncertain ages
 n_before <- nrow(FormattedLGTrappingRecords)
 
-# Remove fish with uncertain ages (containing "?")
+# Remove fish with uncertain ages (containing "?" in BioScaleFinalAge2)
 FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>%
-  filter(is.na(Age2) | !str_detect(Age2, "\\?"))
+  filter(is.na(BioScaleFinalAge2) | !str_detect(BioScaleFinalAge2, "\\?"))
 
 # Count fish after removal
 n_after <- nrow(FormattedLGTrappingRecords)
