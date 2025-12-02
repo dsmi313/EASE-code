@@ -1,0 +1,305 @@
+##DATA AGGREGATION - DART query
+
+#load packages:
+library(tidyverse)
+#library(lubridate)
+#_________________________
+### 1) set variables indicating the species and spawn year of interest.
+sy <- 2025
+spp <- "STHD"
+if(spp == "STHD"){
+  start <- mdy(paste0("7/1/", sy - 1))
+  end <- mdy(paste0("6/30/", sy))
+} else {
+  start <- mdy(paste0("3/1/", sy))
+  end <- mdy(paste0("8/17/", sy))
+}
+
+# Run these to verify dates:
+print(start)
+print(end)
+
+#_________________________
+### 2) build a query to send to the DART database. 
+#This code uses the variables set above to build the query automatically. 
+#This query is performed in the same manner that STADEM queries the database, 
+#but some of the filtering is different 
+#(namely, we below exclude fish PIT-tagged in the LGR trap).
+#build query for DART:
+queryList <- list(type = "tagid", outputFormat = "csv",
+                  year = year(start), site = "GRA",
+                  species = c(1,3)[spp == c("CHNK", "STHD")],
+                  span = ifelse(year(end) > year(start), "yes", "no"),
+                  startdate =  paste(month(start), day(start), sep = '/'),
+                  enddate = paste(month(end), day(end), sep = '/'))
+if(queryList[["span"]] == "yes"){
+  queryList <- c(queryList,
+                 list(syear = lubridate::year(start),
+                      eyear = lubridate::year(end)))
+}
+
+# Check what you're querying:
+print(queryList)
+#_________________________
+### 3) send query to DART (note: requires httr package.):
+library(httr)
+web_req <- httr::GET("http://www.cbr.washington.edu/dart/cs/php/rpt/pit_adult_window_new.php",
+                     query = queryList)
+# will throw an R error if there was an error in the query
+httr::stop_for_status(web_req, task = 'query data from DART')
+
+#_________________________
+### 4) Parsing DART response into a usable R format:
+#We are now going to take the response and turn it into a useable format. 
+#Most of this is just turning text into 
+#an object recognized by R (a tibble), 
+#changing column names, and summarizing the data. However, 
+#we are also filtering out fish PIT tagged in the Lower Granite trap.
+
+#When DART returns data, it also returns a block of text after the data. 
+#When we parse this, R will issue a "warning" saying it doesn't 
+#recognize this text as data and it has thrown out this 
+#block of text. This is exactly what we want, 
+#so the warning is just telling us that R is doing what we intend.
+
+#Now, parse the response:
+# expect some warnings from text at end of response
+parsed <- httr::content(web_req, "text", encoding = "UTF-8") %>%
+  read_delim(delim = ",", col_names = TRUE)
+
+
+#> Warning: 19 parsing failures.
+#>   row                 col   expected              actual         file
+#> 48014 Species             a double   Species             literal data
+#> 48014 WindowDetectionFlag a double   WindowDetectionFlag literal data
+#> 48014 Detection DateTime  date like  Detection DateTime  literal data
+#> 48014 TravelTime          a double   TravelTime          literal data
+#> 48014 TagID Ascent Count  a double   TagID Ascent Count  literal data
+#> ..... ................... .......... ................... ............
+#> See problems(...) for more details.
+# Check what the parsing problems are
+problems(parsed)
+
+# Look at the last few rows to see if there's text
+tail(parsed, 20)
+
+# Filter out the metadata footer (keep only rows with actual Species data)
+parsed <- parsed %>% 
+  filter(!is.na(Species))
+
+# Verify the metadata is gone
+nrow(parsed)  # Should be ~76090
+tail(parsed)  # Should show real data now
+
+colnames(parsed) = gsub(' ', '', colnames(parsed))
+pit_data <- parsed %>% rename(Date = ClockDate) %>%
+  filter(!is.na(Date), Date != " Clock Date", Date != "Date", ReleaseSite != "LGRLDR") %>% # filtering out fish tagged in the ladder
+  mutate(Date = ymd(Date), DetectionDateTime = ymd_hms(DetectionDateTime)) %>%
+  rename(SpCode = Species) %>% mutate(Species = spp, Year = year(end)) %>%
+  select(Ladder, Year, Species, SpCode, TagID, everything()) %>%
+  filter(Date >= start, Date <= end) %>% 
+  mutate(Period = factor(Period, levels = c("D", "N")), 
+         laterAscend = if_else(!is.na(TagIDAscentCount) & TagIDAscentCount > 1, TRUE, FALSE), #CMB 10-4-21: changed column name "Reascent" to "laterAscend" to match data prep file column names of night/fall pit data.
+         SpawnYear = if_else(Species == "CHNK", Year, if_else(Species == "STHD" & Date >= ymd(paste0(Year, "0701")), Year + 1, Year)))
+#Note: Note that above we only filtered out fish PIT tagged in the Lower Granite trap. 
+#You may want to exclude other fish. For example, you may want to 
+#exclude any fish tagged as an adult, as we don't know where it came from. 
+#The above statement can be modified to filter as you see fit.
+
+unique(pit_data$Period) #Ok
+
+# How many detections in each period?
+pit_data %>%
+  group_by(Period) %>%
+  summarise(n = n(), 
+            pct = round(n()/nrow(pit_data)*100, 1))
+
+#_________________________
+### 5) Assign stock groups (aka the groups for which fallback/reascension is 
+#calculated separately for). The below code assigns all Chinook to the 
+#same stock group and splits steelhead based on the place they were PIT tagged.
+pit_data <- pit_data %>% mutate(stockGroup = "upper")
+if(spp == "STHD"){
+  pit_data <- pit_data %>% mutate(stockGroup = if_else(ReleaseSite %in% 
+                                                         c("TUCR", "TUCH", "CURP", "WALLAR", "TOUCHR", "DAYP", "LYFE", "ASOTIC","ASOTNF","ASOTSF","CHARLC","TENMC","GEORGC"), "lower", "upper")) #CMB 10-13-21: added all Asotin Cr groups (ASOTIC, ASOTNF, ASOTSF, CHARLC(trib of Asotin)) to be LOWER, not upper. Per Tim Copeland's direction. added in ten mile and george cr for next year even tho they are not in this yrs data.
+} else {
+  pit_data <- pit_data %>% mutate(stockGroup = "upper")
+}
+
+
+# Check stock group assignment worked correctly
+pit_data %>%
+  group_by(stockGroup, ReleaseSite) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  arrange(stockGroup, desc(n)) %>%
+  print(n = 75)
+
+# Verify LOWER sites are correct (should only see the sites listed in the if_else)
+pit_data %>%
+  filter(stockGroup == "lower") %>%
+  count(ReleaseSite) %>%
+  arrange(desc(n))
+
+
+#Collapsing repeat PIT detections of a unique tagID within a day into unique ascents (unique combo of date, TagID, and TagIDAscentCount). Each row is NOT a unique TagID or fish (checked with length(unique(pitData$TagID))):
+lgr_night_reasc_daily <- pit_data %>% 
+  select(Species, SpawnYear, stockGroup, Date, TagID, Period, TagIDAscentCount, laterAscend) %>%
+  distinct() %>% arrange(Date, TagID, TagIDAscentCount) %>% 
+ filter(!is.na(Period)) 
+#CMB 10-14-21 IMPORTANT: ^the bottom line filters out any fish that have NA in Period column (likely were detected when trap was closed (Jan-Feb)). Approved by Bill. 
+
+# Check that distinct() worked correctly
+lgr_night_reasc_daily %>%
+  summarise(
+    Total_Rows = n(),
+    Unique_Ascents = n_distinct(paste(TagID, Date, TagIDAscentCount))
+  )
+# These two numbers should be EQUAL
+
+# How many records were filtered out due to Period = NA?
+before_filter <- pit_data %>% 
+  select(Species, SpawnYear, stockGroup, Date, TagID, Period, TagIDAscentCount, laterAscend) %>%
+  distinct()
+
+after_filter <- lgr_night_reasc_daily
+
+# Summary
+data.frame(
+  Before = nrow(before_filter),
+  After = nrow(after_filter),
+  Removed_NA = nrow(before_filter) - nrow(after_filter),
+  Pct_Removed = round((nrow(before_filter) - nrow(after_filter))/nrow(before_filter)*100, 2)
+)
+
+# Verify NO NAs remain in Period column
+lgr_night_reasc_daily %>%
+  filter(is.na(Period)) %>%
+  nrow()  # Should be 0
+
+
+
+
+#The way the DART query is currently working, fish that ascend the 
+#ladder over multiple days are assigned to the date they were first detected. 
+#If this ever changes, and all dates returned by the DART query reflect the 
+#detection date, you may end up with multiple rows in pit_data for one detection. 
+#This next section of code should condense these into one row, but is 
+#provided here as an example to help address this problem if it occurs:
+
+# when a fish ascends over more than one day, need to only take the first day
+# This is more of a check, the "ClockDate" column should replicate the date
+# of the first (window) detection, so there shouldn't be any data here unless you use
+# a different Date column or the query output is changed
+spanDay <- lgr_night_reasc_daily %>% count(TagID, TagIDAscentCount) %>% filter(n > 1)
+if(nrow(spanDay) > 0){
+  for(i in 1:nrow(spanDay)){
+    lgr_night_reasc_daily <- bind_rows(lgr_night_reasc_daily %>% 
+                                         filter(TagID != spanDay$TagID[i] | TagIDAscentCount != spanDay$TagIDAscentCount[i]),
+                                       lgr_night_reasc_daily %>% filter(TagID == spanDay$TagID[i], TagIDAscentCount == spanDay$TagIDAscentCount[i]) %>% slice(1)
+    )
+  }
+  lgr_night_reasc_daily <- lgr_night_reasc_daily %>% arrange(Date, TagID, TagIDAscentCount)
+} ##what is this checking and why should there be no rows/data here?
+
+
+
+# The spanDay check - should be 0 rows
+spanDay <- lgr_night_reasc_daily %>% 
+  count(TagID, TagIDAscentCount) %>% 
+  filter(n > 1)
+
+# How many problem fish?
+nrow(spanDay)  # Should be 0
+
+# If NOT 0, view the problem records:
+if(nrow(spanDay) > 0){
+  print(paste("WARNING:", nrow(spanDay), "fish detected across multiple days"))
+  spanDay %>% head(10)
+}
+
+#_________________________
+### 6) We now have PIT tag data that can be prepped for estimating escapement:
+print(lgr_night_reasc_daily, width = 1000)
+
+# Summary of final dataset
+lgr_night_reasc_daily %>%
+  summarise(
+    Total_Ascents = n(),
+    Unique_Fish = n_distinct(TagID),
+    Fish_with_Fallback = sum(TagIDAscentCount > 1),
+    Pct_Fallback = round(sum(TagIDAscentCount > 1)/n_distinct(TagID)*100, 1),
+    Date_Range = paste(min(Date), "to", max(Date))
+  )
+
+# Period distribution (Day vs Night)
+lgr_night_reasc_daily %>%
+  group_by(Period) %>%
+  summarise(n = n(), pct = round(n()/nrow(.)*100, 1))
+
+# Stock group distribution
+lgr_night_reasc_daily %>%
+  group_by(stockGroup) %>%
+  summarise(n = n(), pct = round(n()/nrow(.)*100, 1))
+
+# Fallback/Reascension summary by stock group
+lgr_night_reasc_daily %>%
+  group_by(stockGroup, TagIDAscentCount) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  arrange(stockGroup, TagIDAscentCount)
+
+# Check for any NAs in critical columns
+lgr_night_reasc_daily %>%
+  summarise(
+    NA_TagID = sum(is.na(TagID)),
+    NA_Date = sum(is.na(Date)),
+    NA_Period = sum(is.na(Period)),
+    NA_AscentCount = sum(is.na(TagIDAscentCount)),
+    NA_stockGroup = sum(is.na(stockGroup))
+  )  # All should be 0
+
+#> # A tibble: 2,370 x 8
+#>    Species SpawnYear stockGroup Date       TagID          Period
+#>    <chr>       <dbl> <chr>      <date>     <chr>          <fct> 
+#>  1 STHD         2018 upper      2017-07-10 3DD.007771C8DE N     
+#>  2 STHD         2018 lower      2017-07-11 3DD.0077517A97 D     
+#>  3 STHD         2018 upper      2017-07-11 3DD.007771C8DE D     
+#>  4 STHD         2018 upper      2017-07-21 384.3B2397A967 D     
+#>  5 STHD         2018 upper      2017-07-27 3DD.00779953F7 D     
+#>  6 STHD         2018 upper      2017-07-28 3DD.0077995084 D     
+#>  7 STHD         2018 upper      2017-07-28 3DD.0077BAAAEE D     
+#>  8 STHD         2018 upper      2017-08-01 3DD.007778BA54 D     
+#>  9 STHD         2018 upper      2017-08-02 3DD.0077BAB934 D     
+#> 10 STHD         2018 upper      2017-08-10 3DD.007796BD52 D     
+#>    TagIDAscentCount ReAscent
+#>               <dbl> <lgl>   
+#>  1                1 FALSE   
+#>  2                1 FALSE   
+#>  3                2 TRUE    
+#>  4                1 FALSE   
+#>  5                1 FALSE   
+#>  6                1 FALSE   
+#>  7                1 FALSE   
+#>  8                1 FALSE   
+#>  9                1 FALSE   
+#> 10                1 FALSE   
+#> # ... with 2,360 more rows
+
+#Each row is intended to represent a unique ascension. Here is what the columns represent:
+#Species the species
+#SpawnYear the spawn year
+#stockGroup the "stock group" that we defined for that PIT tag
+#Date the date the ascension was made
+#TagID the PIT tag ID
+#Period whether the ascension passed the window during the window counting hours (D) or not (N)
+#TagIDAscentCount the ascent number for the PIT tag. First ascent is 1, second is 2, etc.
+#ReAscent Whether this ascent was a reascension (TRUE) or the first ascension (FALSE) #CMB 10-4-21: "ReAscent" is now "laterAscend"
+
+#___________________
+#If we want to export this data as a csv file, we run this code:
+write.csv(pit_data, file = paste0("SY",sy,spp,"_pit_data",".csv"),row.names = FALSE)
+write.csv(lgr_night_reasc_daily, file = paste0("SY",sy,spp,"_PITdata_lgr_night_reasc_daily",".csv"), row.names = FALSE)
+write.csv(parsed, file = paste0("SY",sy,spp,"_parsed",".csv"),row.names = FALSE)
+
+#save global environment for reference:
+#save.image(file = paste0("SY",sy,spp,"_Input4_PITdataPREP_DARTquery",".rda"))
+
