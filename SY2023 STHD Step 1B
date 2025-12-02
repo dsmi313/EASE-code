@@ -1,0 +1,95 @@
+## Load required packages ##
+library(tidyverse, quietly = TRUE)
+library(lubridate, quietly = TRUE)
+library(DBI, quietly = TRUE)
+library(odbc, quietly = TRUE)
+library(glue, quietly = TRUE)
+options(dplyr.summarise.inform = FALSE)
+
+
+# Query LGTrapping --------------------------------------------------------
+
+# Set Spawn year of interest
+sy <- 2024
+# Set species of interest (STHD or CHNK)
+spp <- "STHD"
+# Set variables (column names)
+vars <- c("OperationsDate", "WeekNumber", 
+          case_when(spp == "STHD" ~ "COESthdAll",
+                    spp == "CHNK" ~ "COEChinAll"))
+# Set species specific spawn year variable. The view in the Lower Granite Trapping db has SpawnYearSTHD and SpawnYearCHN columns. Here we are determining which we are going to filter on.
+SYCol <- case_when(spp == "STHD" ~ "SpawnYearSTHD",
+                   spp == "CHNK" ~ "SpawnYearCHN")
+
+
+# Connect to LGDTrapping DB
+Connection <- 
+  dbConnect(odbc(),
+            Driver = "ODBC Driver 17 for SQL Server",
+            Server = "idfgnrsql2",
+            Database = "LGDTrapping",
+            Trusted_Connection = "yes")
+
+# Prepare SQL query
+qryCOEWindowCounts <- glue_sql(.con = Connection,
+  "SELECT {`vars`*}
+  FROM vwLGDOperationsMasterCombine
+  WHERE {`SYCol`} = {sy}")
+
+# Send query to server
+COEWindowCounts <- dbGetQuery(Connection, qryCOEWindowCounts)
+
+# Disconnect from server
+dbDisconnect(Connection)
+
+# WeekNumber verification. Does it start on Monday and end on Sunday? Are they 7 days?
+COEWindowCounts %>% 
+  group_by(WeekNumber) %>% 
+  summarise(minDate = min(OperationsDate), 
+            minDayofWeek = wday(min(OperationsDate), label = TRUE), 
+            maxDate = max(OperationsDate), 
+            maxDayofWeek = wday(max(OperationsDate), label = TRUE),
+            sWeekLength = max(OperationsDate) - min(OperationsDate) + 1) %>% 
+  arrange(minDate) %>% 
+  print(n = 100) #shows all 53 weeks of the year. daily counts; Window count of -1 is not an error, it's referring to a fish swimming downstream at the window (accounts for fallback at window). Ok if first or last week <7d and doesnt start on a Mon and end on a Sun given differences in the weekday tht starts and ends the spawn year dates. Our statistical wks start on a Mon and end on a Sun
+
+# Rename columns for EASE
+COEWindowCounts <- COEWindowCounts %>% 
+  rename(Date = OperationsDate, weekNum = WeekNumber, win_cnt = vars[3])
+
+#export this df so we have dates associated with sweeks to prep PIT tag data
+write.csv(COEWindowCounts, 'SY2024STHD.dates.with.weekNums.csv',row.names = F)
+
+### Query FPC according to established parameters. Save the .csv file.
+#Add link for FPC DB and could query it from R
+
+# Replace the filepath in quotes with the filepath for the FPC query file. 
+FPCWindowCounts <- read_csv("C:/Users/nicolette.beeken/OneDrive - State of Idaho/Documents/Nampa Anadromous Fisheries Research/LGR EASE (adult) analysis_Beeken/EASE data/SY2024 STHD/Input file prep/WindowCounts/SY2024STHD.FPC.WindowCounts.csv", 
+                            col_types = cols(Date = col_date(format = "%m/%d/%Y"))) # reformats the Date column to be readable by R; warning ok just referring to text in last couple rows
+
+# Join the window counts from the LGTrapping database and the FPC. Add a field to check that daily totals match.
+# This is a true/false field. If passage counts match then TRUE, if not then FALSE. When no fish were passed then NA
+Compare <- left_join(COEWindowCounts, FPCWindowCounts, by = "Date") %>%
+  mutate(Comparison = if_else(win_cnt == Steelhead, TRUE, FALSE))
+
+# Ensure there are only NA or True. If there is a false, there is a mismatch between the FPC and LGTrap. NAs are ok, that just means no fish passed on those days.
+Compare %>% group_by(Comparison) %>% summarise(n())
+
+#Now we need to sum the counts by statistical week. 
+#using year and week of the year - if you 
+#define statistical week differently, you need to change the 
+#code as appropriate. Column names are important here, the 
+#names in the input for escapeLGD must be sWeek and wc.
+#colnames(wc)[which(names(wc) == "weekNum")] <- "sWeek" #change weekNum to sWeek bc Corey file already created sWeek. 10-19-22 CMB
+COEWindowCounts.by.wk <- COEWindowCounts %>%
+  mutate(win_cnt = if_else(is.na(win_cnt), 0, as.double(win_cnt))) %>% #CMB: replacing NAs with 0 for when the trap was closed
+  group_by(y = year(Date), w = weekNum) %>% summarise(wc = sum(win_cnt), .groups = "drop") %>%
+  arrange(y, w) %>% mutate(sWeek = paste0(y, "_", w)) %>% select(sWeek, wc) #creating a statistical week column "sWeek" from the Date and weekNum columns. summed correctly (use Excel)
+
+#SAVE AN EXPANDED VERSION IF ANYONE NEEDS IT:
+write.csv(COEWindowCounts.by.wk, 'SY2024STHD_WindowCountLGTrapDB_expanded.csv', row.names=F) #window counts are expanded in FPC and LGTrap databases to account for 10 min of each hr that fish are not counted. Export expanded version before it's un-expanded and to have as a comparison btw expanded vs un-expanded 
+
+#UNEXPAND THE WINDOW COUNTS:
+#The window counts we have here are already "expanded" by the sampling time (5/6). You may have the raw counts (un-expanded window counts) -IF THAT'S THE CASE, SKIP THIS NEXT STEP. If not, then let's reverse this "expansion". 
+COEWindowCounts.by.wk_unexpanded <-COEWindowCounts.by.wk  %>% mutate(wc = round(wc * (5/6))) #(use R to check that unexpansion calc correct)
+write.csv(COEWindowCounts.by.wk_unexpanded,'SY2024STHD_wc_unexpanded.csv',row.names = F)
