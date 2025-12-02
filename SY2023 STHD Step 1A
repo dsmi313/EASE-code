@@ -1,0 +1,579 @@
+---
+title: "EASE_LGRTrapping_DataPrep"
+output:
+  html_document:
+    df_print: paged
+---
+<style type="text/css">
+.main-container {
+  max-width: 2800px;
+  margin-left: 5px;
+  margin-right: 5px;
+}
+</style>
+
+#### Load required packages and change options to suppress summarise() grouping message.
+```{r message=FALSE, warning=FALSE}
+## Load required packages ##
+library(tidyverse, quietly = TRUE)
+#library(lubridate, quietly = TRUE)
+library(DBI, quietly = TRUE)
+library(odbc, quietly = TRUE)
+options(dplyr.summarise.inform = FALSE)
+```
+
+#### Set working directory. This is where the formatted .csv file will save to.
+```{r setup}
+knitr::opts_knit$set(root.dir = normalizePath("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs"))
+```
+getwd()
+#### Set species (STHD or CHNK) and spawn year of interest. Species must be STHD or CHNK and must be surrounded by quotation marks. Spawn year must be a valid year, integer, with no quotes.
+```{r}
+# Set Spawn year of interest
+sy <- 2025
+# Set species of interest (STHD or CHNK)
+spp <- "STHD"
+```
+
+#### Query the Lower Granite Trapping database.
+
+This query was intentionally designed to only accept CHNK or STHD as a species; any other entry in the above chunk will cause an error if you try to run this query. This query uses the odbc() and DBI() package to pass a SQL query to our Microsoft SQL Server instance at Nampa Research.
+```{r}
+# Connect to LGDTrapping DB
+Connection <- 
+  dbConnect(odbc(),
+            Driver = "ODBC Driver 17 for SQL Server",
+            Server = "idfgnrsql2",
+            Database = "LGDTrapping",
+            Trusted_Connection = "yes")
+
+# Send Query to server #all variables in LGDTrapping DB are queried
+qryLGTrappingRecords <- dbSendQuery(Connection,
+  "SELECT *
+  FROM TempLGTrappingExcelPivotfromvwLGDMasterCombine
+  WHERE CollectionLocation = 'Lower Granite Dam ->'
+  AND SpawnYear = ?
+  AND LGDValid = 1
+  AND LGDSpecies = ?
+  AND LGDLifeStage = 'RF'",
+  params = list(paste0("SY", as.character(sy)), 
+                as.character(case_when(spp == "STHD" ~ 3,
+                                       spp == "CHNK" ~ 1))))
+
+# Retrieve results from query
+LGTrappingRecords <- dbFetch(qryLGTrappingRecords)
+
+# Clear results on server
+dbClearResult(qryLGTrappingRecords)
+
+# Disconnect from server
+dbDisconnect(Connection)
+```
+
+Check the data for valid entries. The SQL query specifies LGDValid = 1, so there should not be any missing data in FLmm, CollectionDate, LGDSpecies or AD-Clip status (or LGDRear, but we won't check that because we use GenRear in EASE). Nonetheless, let's check those fields.
+```{r message=TRUE, warning=TRUE, paged.print=TRUE}
+# Make sure no NAs in FLmm
+LGTrappingRecords %>% 
+  filter(is.na(LGDFLmm)) %>% 
+  count() #ok
+
+# Check the range of fork lengths to be sure no record with FLmm < 300 is included and all fork lengths are realistic.
+LGTrappingRecords %>% 
+  summarise(min(LGDFLmm), max(LGDFLmm)) #ok
+
+# Make sure no NA in CollectionDate 
+LGTrappingRecords %>% 
+  filter(is.na(CollectionDate)) %>% 
+  count() #ok
+
+# Check range of the collection date (sthd = 7/1 of prev. calendar year to 6/30 of spawn year)
+LGTrappingRecords %>% 
+  summarise(min(CollectionDate), max(CollectionDate)) #ok
+
+# Check SRR: sthd should all start with 3, check no NAs
+LGTrappingRecords %>% 
+  group_by(SRR) %>% 
+  summarise(n()) %>% 
+    bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total")) #ok
+
+# Check LGDMarkAD to ensure that only AI and AD are present, no NAs
+LGTrappingRecords %>% 
+  count(LGDMarkAD) %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total"))#ok
+
+```
+
+Export unformatted data in case u need it for prelim report, creating/sending SCOBI input files, or other data requests. This file includes all variables present in LGTrap DB.
+write.csv(LGTrappingRecords, 'SY2023 STHD LGTrap.Query.Unformatted.Data.csv', row.names = F) #run in console
+
+### Formatting LGTrappingRecords for EASE input
+To format the raw data for EASE we need several new variables as well as changes to existing variables. I will preserve the original columns for the QC steps below. New columns will be appended a 2 to make them easy to identify and select for the new dataframe. Above each code chunk I will list the name of the new column and explain how it was computed
+
+- LGDSpecies2, SpawnYear2, MasterID2, LGDMarkAD2, LGDFLmm2, GenMa2, and GenPa2: these are exact copies of the original columns, but we want to keep those fields in the final output, so I'm adding the 2 to make it easier to pick out at the end.
+- CollectionDate2: reformatted CollectionDate using the ymd() function to make it easier to work with using the lubridate package.
+- PBTBYHat2: calculated from GenPBT_ByHat. Blank strings and "NG" are converted to NA_character_, "Unassigned-H" and "Unassigned-W" are converted to "Unassigned", all other values are preserved.
+- physTag2: Calculated from LGDTagsAll and LGDMarksAll. TRUE if there is a CWT, left ventral fin clip or right ventral fin clip. check that no NAs
+
+RUN chunk to verify PBTBYHat2 and physTag2.
+```{r rows.print = 200}
+FormattedLGTrappingRecords <- LGTrappingRecords %>% 
+  mutate(LGDSpecies2 = LGDSpecies,
+         SpawnYear2 = SpawnYear,
+         MasterID2 = MasterID,
+         BioSamplesID2 = BioSamplesID,
+         LGDMarkAD2 = LGDMarkAD,
+         LGDFLmm2 = LGDFLmm,
+         GenStockProb2 = GenStockProb,
+         LGDFishComments2 = LGDFishComments,
+         GenComments2 = GenComments,
+         LGDMarksAll2 = LGDMarksAll,
+         LGDTagsAll2 = LGDTagsAll,
+         LGDMarkADComment2 = LGDMarkADComment,
+         PtagisFlags2 = PtagisFlags,
+         WeekNumber2 = WeekNumber,
+         SRR2 = SRR,
+         GenMa2 = GenMa,
+         GenPa2 = GenPa,
+         CollectionDate2 = ymd(CollectionDate),
+         PBTBYHat2 = case_when(GenPBT_ByHat %in% c("NG", "","#N/A") ~ NA_character_,
+                              grepl("Unassigned", GenPBT_ByHat) ~ "Unassigned",
+                              TRUE ~ GenPBT_ByHat),
+         physTag2 = grepl("[Ww]ire", LGDTagsAll) | grepl("[LR]V", LGDMarksAll)) #added some variables that Alan needs to run SCOBI
+
+#PBTBYHat2
+FormattedLGTrappingRecords %>% 
+  group_by(GenPBT_ByHat, PBTBYHat2) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total")) #ok
+
+#physTag2
+FormattedLGTrappingRecords %>% 
+  group_by(LGDTagsAll, LGDMarksAll, as.character(physTag2)) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total"))#Ok; wire is CWT; LV & RV are left ventral fin clip and right ventral fin clip
+```
+
+- PBTRGroup2: Calculated from GenPBT_RGroup. Blank strings and "NG" are converted to NA_character_, "Unassigned-H" and "Unassigned-W" are converted to "Unassigned", all other values are preserved.
+
+Run chunk to verify
+```{r rows.print = 200}
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>%
+  mutate(PBTRGroup2 = case_when(GenPBT_RGroup %in% c("NG", "","#N/A") ~ NA_character_,
+                                grepl("Unassigned", GenPBT_RGroup) ~ "Unassigned",
+                                TRUE ~ GenPBT_RGroup))
+
+FormattedLGTrappingRecords %>% 
+  group_by(GenPBT_RGroup, PBTRGroup2) %>% 
+  summarise(n = n()) %>%  
+  ungroup() %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total"))#ok
+```
+
+- Rear2: Calculated from SRR and LGDMarkAD. The code to generate Rear2 is based on the SRR field from the LGDTrapping database. SRR uses a standard hierarchical formula to assign a rear based on AD clip status, physical tags, PBT and GSI results. 
+
+Use the first output to check that records with SRR XXH and LGDMarkAD "AD" are set to "H". Records with SRR XXH and LGDMarkAD "AI" are set to "HNC". Records with SRR XXW and LGDMarkAD "AI" are set to "W". 
+
+The second output is for confirming that the underlying factors that determine SRR are all correct and valid. For the purpose of summarizing and error checking, we categorize assignments into Assigned for any records that assigned to any hatchery or release group. This helps viewability by compressing the second output so that we don't have to view every RGroup. The transformation only applies to the view, not the main dataset. Check: All AI fish with a physical tag or assigned to PBT are HNC. All other AI fish are W. physTag2=TRUE if there is a CWT, left ventral fin clip or right ventral fin clip.
+```{r rows.print = 200}
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(Rear2 = case_when(str_sub(SRR, 3,3) == "H" & LGDMarkAD == "AD" ~ "H",
+                          str_sub(SRR, 3,3) == "H" & LGDMarkAD == "AI" ~ "HNC",
+                          str_sub(SRR, 3,3) == "W" & LGDMarkAD == "AI" ~ "W",
+                          TRUE ~ ""))
+
+FormattedLGTrappingRecords %>% 
+  group_by(SRR, LGDMarkAD, Rear2) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>%
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total"))#ok
+
+
+FormattedLGTrappingRecords %>% 
+  mutate(PBTRGroup2 = if_else(grepl("^2", PBTRGroup2), "Assigned", PBTRGroup2),
+         PBTBYHat2 = if_else(grepl("^2", PBTBYHat2), "Assigned", PBTBYHat2)) %>% 
+  group_by(LGDMarkAD, physTag2, PBTBYHat2, PBTRGroup2,  Rear2) %>% 
+  summarise(n = n()) %>% 
+  arrange(LGDMarkAD, desc(physTag2)) #ok
+```
+
+Rear2: QAQC checks between the original data (LGTrappingRecords) and formatted data (FormattedLGTrappingRecords) by running the following table in console, table(LGTrappingRecords$LGDMarkAD), and comparing to output 1 above. 
+step 1: Total AD fish is = between datasets
+step 2: Total AI fish in original = sum of HNC and W fish in formatted
+step 3: Total fish is = between datasets
+
+- GenSex2: Calculated from GenSex. Preserves "M" and "F" designations while setting "U" and "NG" to NA_character_. 
+
+RUn chunk to verify
+```{r rows.print = 200}
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(GenSex2 = case_when(GenSex %in% c("M", "F") ~ GenSex,
+                             TRUE ~ NA_character_))
+
+FormattedLGTrappingRecords %>% 
+  group_by(GenSex, GenSex2) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>%
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total")) #ok
+```
+
+GenSex2: QAQC checks by running following in console and comparing to output above: 
+table(LGTrappingRecords$GenSex)
+
+LGTrappingRecords %>%
+group_by(GenSex)%>%
+summarise(n=n()) #shows number of NAs in original data
+
+step 1-2: 1) Number of males and 2) number of females is = between the datasets
+step 3: Number of NAs in GenSex2 col in formatted = the sum of NG, U, and NAs in original.
+step 4: Total fish is = between datasets
+
+- GenStock2: Calculated from GenStock and Rear2. Some odd GenStock designations are corrected (ex. LOWCLWR will be changed to LOCLWR). All other GenStocks are preserved.
+
+Run chunk to verify. The first output is to check that all "H" and "HNC" records are set to NA for GenStock2 assignment. The second is filtered to only include wild fish. Use it to confirm that "NG" was converted to NA_character_ and that only the expected GenStocks are present.
+```{r rows.print = 200}
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(GenStock2 = case_when(GenStock %in% c("NG", "NA","","#N/A") ~ NA_character_,
+                               Rear2 %in% c("H", "HNC") ~ NA_character_,
+                               grepl("LO[W?]CLWR", GenStock) ~ "LOCLWR",
+                               grepl("LO[W?]SALM", GenStock) ~ "LOSALM",
+                               TRUE ~ GenStock))
+
+FormattedLGTrappingRecords %>% 
+  group_by(Rear2, GenStock2) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total"))#ok
+
+FormattedLGTrappingRecords %>% 
+  filter(Rear2 == "W") %>% 
+  group_by(GenStock, GenStock2) %>% 
+  summarise(n = n())#ok
+```
+
+- MPG2: Calculated from GenStock2 and LGDSpecies. 
+If LGDSpecies is 3 (STHD): records that have a Salmon River GenStock, will become SALMON MPG, Clearwater GenStocks will become CLRWTR MPG. Other GenStocks do not need translated as the GenStock and MPG names are the same. All fish with an assigned GenStock and MPG should be W rear and AI. 
+
+RUN chunk to verify
+```{r eval=FALSE, rows.print=200}
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(MPG2 = if_else(LGDSpecies == "3", #STHD specific MPGs
+                        case_when(str_detect(GenStock2, ".*SALM") ~ "SALMON",
+                                  str_detect(GenStock2, ".*CLWR") ~ "CLRWTR",
+                                  GenStock2 == "CHMBLN" ~ "SALMON",
+                                  TRUE ~ GenStock2),
+                        case_when(GenStock2 == "CHMBLN" ~ "MFSALM",
+                                  TRUE ~ GenStock2))) #could delete CHMBLN stuff since applies to CHNK
+
+FormattedLGTrappingRecords %>% 
+  group_by(Rear2, GenStock2, MPG2, LGDMarkAD) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total"))#ok
+```
+
+MPG2: QAQC checks by running the following in console: 
+
+FormattedLGTrappingRecords %>% group_by(MPG2) %>% summarise(n=n())
+FormattedLGTrappingRecords %>% group_by(GenStock2) %>% summarise(n=n())
+
+Step 1: Number of fish in each MPG = sum of stocks that comprise each MPG
+Step 2: Total fish is = between datasets
+
+- BioScaleFinalAge2: Calculated from BioScaleFinalAge and Rear2. Removes ages from H and HNC fish, removes whitespace from ages.
+- fwAge2: Calculated from BioScaleFinalAge2. Sets any record with BioScaleFinalAge of "N:A" or with a "?" to NA_character_ then takes the first character of the age and applies it to the fwAge2 variable.
+- swAge2: Calculated from BioScaleFinalAge2. Sets any record with BioScaleFinalAge of "N:A" or with a "?" to NA_character_, takes everything after the semicolon and applies it to swAge2 variable. After Age2 and totalAge2 are calculated, set anything with an "S" or "R" to "Repeat".
+- Age2: If fwAge2 is NA, sets Age2 to NA_character_. If not, concatenates "F", fwAge2, "S", and swAge2.
+- TotalAge2: Calculated from swAge2 and fwAge2. From swAge2, it replaces any S or R with a 1, splits each character apart and then adds them together for a total swAge (this is the step that converts repeat spawner age notation into an age in years). Sums fwAge2, swAge2 and adds 1 for the annulus not deposited during spawning migration. The equation boils down to: [fwAge + swAge + 1] = totalAge2
+- BY2: Calculated from SpawnYear and totalAge2. If TotalAge2 is NA, then set to NA_character_. Otherwise extract the four digit year from SpawnYear, subtract totalAge2 and append BY to beginning (ex. BY2014). Equation is [SpawnYear - totalAge2] = BY2
+
+
+```{r rows.print = 200}
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(BioScaleFinalAge2 = case_when(Rear2 %in% c("H", "HNC") ~ NA_character_,
+                                       TRUE ~ str_replace(BioScaleFinalAge, " ", "")))
+
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(fwAge2 = case_when(grepl("\\?|N", BioScaleFinalAge2) ~ NA_character_,
+                            TRUE ~ str_sub(FormattedLGTrappingRecords$BioScaleFinalAge2, 1,1)))
+
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(swAge2 = case_when(grepl("\\?|N", BioScaleFinalAge2) ~ NA_character_,
+                           str_sub(BioScaleFinalAge2, str_locate(FormattedLGTrappingRecords$BioScaleFinalAge2, ":")[,1] +1, str_length(BioScaleFinalAge2)) == "MJ" ~ "0",
+                           TRUE ~ str_sub(BioScaleFinalAge2, str_locate(BioScaleFinalAge2, ":")[,1] +1, str_length(BioScaleFinalAge2))))
+#could delete MJ part since that applies to CHNK
+
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(Age2 = if_else(!is.na(fwAge2), paste0("F", fwAge2, "S", swAge2), NA_character_))
+
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(totalAge2 = (sapply(str_split(str_replace(swAge2, "[S,R]", "1"), ""), function(x) sum(as.numeric(x))) + as.numeric(fwAge2) + 1))
+
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(swAge2 = if_else(str_detect(swAge2, "[S,R]"), "Repeat", swAge2))
+
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(BY2 = if_else(is.na(totalAge2), NA_character_, paste0("BY", as.numeric(str_sub(SpawnYear, 3, 6)) - totalAge2)))
+
+#This chunk outputs two dataframes. Use the first to check that ages and By are set to NA for "H" and "HNC". 
+
+FormattedLGTrappingRecords %>% 
+  filter(Rear2 != "W") %>% 
+  group_by(Rear2, BioScaleFinalAge2, fwAge2, swAge2, Age2, totalAge2, BY2) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total")) #Ok
+
+#Use the second output to check that 1) non-ageable samples ("N:A") are set to NA for ages and BY and 2) for rows with NA in Age2 col- that fwAge, swAge, totalAge, and BY are also all NA, and 3) that totalAge and BY calculations are correct.
+
+FormattedLGTrappingRecords %>% 
+  filter(Rear2 == "W") %>% 
+  group_by(Rear2, BioScaleFinalAge, BioScaleFinalAge2, fwAge2, swAge2, Age2, totalAge2, BY2) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total")) #ok
+#fish with only swAges are excluded (swAge set to NA) since we cant calc total age and BY. This maintains = sample sizes of wild fish with 1)genstock and swAge, 2)genstock and age, & 3)genstock and BY
+```
+
+QAQC checks for age data by running following in console:
+age.df<-LGTrappingRecords %>% 
+filter(SRR =='13W'|SRR=='15W') %>% 
+group_by(SRR, BioScaleFinalAge) %>% 
+summarise(n=n()) Try copy+paste to excel for summing
+
+sum(age.df$n) #total number of fish. Subtract number of wild fish w/o fwAge AND swAge from this total to yield number of wild fish with fwAge AND swAge in original data.
+
+Step 1: Number of NAs for wild fish with total ages in formatted (output 2 above) = number of wild fish that don't have a fwAge AND swAge in original
+Step 2: Number of wild fish with total age in formatted = number of wild fish with a fwAge AND swAge in original
+Step 3: If a 'S' or 'R' is present in BioScaleFinalAge2 col, check that swAge2 col populated as 'Repeat'
+Step 4: Total fish is = between datasets
+#can write code to sum NA's in formatted data
+
+- ReleaseGroup2: Calculated from Rear2, PBTBYHat2 and PBTRGroup2. The goal here is to remove PBTRGroup from both wild fish and fish without a PBTBYHat designation, call "Unassigned" fish "Unassigned" (we don't want fish that could not be genotyped to hatchery), and finally preserve the RGroup if none of the above is true. In other words, We set release group of hatchery fish to NA when PBTBYHat is NA and set their release group to unassigned when PBTBYHat is unassigned. 
+
+Check for first output: When Rear == "W" and assigned to GenStock (!NA for GenStock), ReleaseGroup2 set to Unassigned and wild fish with NA for genstock are set to NA for ReleaseGroup2). When PBTBYHat2 is NA sets ReleaseGroup2 to NA. When PBTBYHat2 is "Unassigned", sets ReleaseGroup2 to "Unassigned".
+```{r rows.print = 200}
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(ReleaseGroup2 = case_when(Rear2 == "W" & !is.na(GenStock2) ~ 'Unassigned',
+                                               Rear2=='W' & is.na(GenStock2) ~ NA_character_,
+                                               is.na(PBTBYHat2) ~ NA_character_,
+                                               PBTBYHat2 == "Unassigned" ~ "Unassigned",
+                                               TRUE ~ PBTRGroup2))
+
+FormattedLGTrappingRecords %>% 
+  mutate(PBTRGroup2 = if_else(grepl("^2", PBTRGroup2), "Assigned", PBTRGroup2),
+         PBTBYHat2 = if_else(grepl("^2", PBTBYHat2), "Assigned", PBTBYHat2),
+         ReleaseGroup2 = if_else(grepl("^2", ReleaseGroup2), "Assigned", ReleaseGroup2)) %>% 
+  group_by(Rear2, PBTBYHat2, PBTRGroup2, ReleaseGroup2, GenStock2) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total")) 
+
+FormattedLGTrappingRecords %>% 
+  filter(Rear2 == "HNC") %>% 
+  mutate(`PBT Assignment in Original` = if_else(grepl("^2", GenPBT_ByHat), "Assigned", GenPBT_ByHat),
+         ReleaseGroup2 = if_else(grepl("^2", ReleaseGroup2), "Assigned", ReleaseGroup2)) %>% 
+  group_by(Rear2, LGDMarkAD, `PBT Assignment in Original`, ReleaseGroup2) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total")) 
+
+#Check for 3rd output: If there is a specific PBTRGroup2, it's preserved in ReleaseGroup2 col. All fish that assigned to a ReleaseGroup2 also assigned to a PBTBYHat (stretch script to see all cols or might be easier to check in Excel using final trap data). ReleaseGroup2 should only have values of specific release groups, unassigned, or NA. 
+
+FormattedLGTrappingRecords %>% 
+  group_by(Rear2, PBTBYHat2, PBTRGroup2, ReleaseGroup2) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total"))
+```
+
+QAQC checks for ReleaseGroup2 by running following in console:
+OriginalData_releasegrpCounts<-LGTrappingRecords %>% filter(SRR =='32H',LGDMarkAD=='AI')%>% group_by(SRR,LGDMarkAD,GenPBT_RGroup)%>%summarise(n=n())
+
+sum(OriginalData_releasegrpCounts$n) #subtract counts of fish that did NOT assign (includes unassigned) to a GenPBT_RGroup from total (i.e., #N/A, Unassigned-H, NG, and NA) to get count that did assign. Do this in formatted (output above) and original datasets
+
+Object.View.all.cols.at.once<-FormattedLGTrappingRecords %>% 
+  group_by(Rear2, PBTBYHat2, PBTRGroup2, ReleaseGroup2) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total"))
+
+Step 1: The number of HNC fish assigned to a ReleaseGroup2 in formatted (output 2 above) = the number of AI Hatchery fish assigned to a GenPBT_RGroup in original
+Step 2: Number of HNC fish with NA for ReleaseGroup2 in formatted (output 2 above) = sum of Hatchery AI fish that are NG and NA for GenPBT_RGroup in original
+Step 3: Total fish is = between datasets
+
+
+- sWeek2: Calculated from WeekNumber and the year of CollectionDate. Concatenation of CollectionDate year and WeekNumber separated by an underscore.
+- lenCat2: Calculated from spp and LGDFLmm. For "STHD" categorize anything that's at least 780mm as "Lg" and the rest as "Sm". 
+
+This chunk outputs three dataframes. Use first to check that sWeek2 column was created correctly. Can use it to see how many fish were trapped in each statistical week. 
+
+Use second to check that statistical week starts on a Monday and ends on Sunday, as well as the length of the statistical week. In some cases, the trap was only open during the weekdays (closed on weekends during spring-summer CHNK run period 3/1-8/17; stat week from Mon-Fri) or was closed on days other than the weekends. Trap closes in mid Nov. Can use emailed LGR weekly trap summary to check these cases. We may not trap fish on the 1st and last dates of the run period and these dates may not fall on a Mon or Fri/Sun. These dates are when the fish were trapped so may not have trapped fish at the start or end of a statistical wk. In these cases the week could appear shorter than you might expect and might not start and end on the expected weekdays. LGTrap week numbers are not all sweeks of the SY but are the sweeks when fish were trapped. But window count and strata files include all sweeks of the SY
+
+Use third to view totals in each length category. Check that no NAs and that total fish is = between original and formatted data.
+```{r rows.print = 200}
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(sWeek2 = paste0(year(CollectionDate), "_", WeekNumber))
+
+FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
+  mutate(lenCat2 = case_when(spp == "STHD" ~ if_else(LGDFLmm >= 780, "Lg", "Sm"),
+                            spp == "CHNK" ~ if_else(LGDFLmm >= 570, "Lg", "Sm")))
+
+FormattedLGTrappingRecords %>% 
+  group_by(year(CollectionDate), WeekNumber, sWeek2) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total")) %>% 
+  print(n = 100) 
+
+FormattedLGTrappingRecords %>% 
+  group_by(sWeek2) %>% 
+  summarise(minDate = min(CollectionDate2), 
+            minDayofWeek = wday(min(CollectionDate2), label = TRUE), 
+            maxDate = max(CollectionDate2), 
+            maxDayofWeek = wday(max(CollectionDate2), label = TRUE),
+            sWeekLength = max(CollectionDate2) - min(CollectionDate2) + 1)
+
+FormattedLGTrappingRecords %>% 
+  group_by(lenCat2) %>% 
+  summarise(n = n()) %>% 
+  ungroup() %>% 
+  bind_rows(summarise_all(., ~if(is.numeric(.)) sum(., na.rm = TRUE) else "Total"))
+```
+
+
+### Select formatted columns, remove the "2" from column names, and save to .csv file. getwd() displays where the file saved. 
+
+```{r rows.print = 200}
+trap <- FormattedLGTrappingRecords %>% 
+  select(ends_with("2"))
+
+colnames(trap) <- gsub("2", "", colnames(trap))
+
+trap <- rename(trap, 
+                      BioScaleFinalAge.1 = BioScaleFinalAge,
+                      releaseGroup = ReleaseGroup) %>% 
+  mutate(y = year(CollectionDate),
+         w = str_sub(sWeek, start = 6))
+
+trap = select(trap,
+                                MasterID,
+                                BioSamplesID,
+                                SpawnYear,
+                                CollectionDate,
+                                sWeek,
+                                y,
+                                w,
+                                LGDSpecies,
+                                LGDFLmm,
+                                SRR,
+                                LGDMarkAD,
+                                physTag,
+                                GenMa,
+                                GenPa,
+                                PBTBYHat,
+                                PBTRGroup,
+                                Rear,
+                                GenSex,
+                                GenStock,
+                                GenStockProb,
+                                LGDFishComments,
+                                GenComments,
+                                LGDMarksAll,
+                                LGDTagsAll,
+                                LGDMarkADComment,
+                                PtagisFlags,
+                                WeekNumber,
+                                MPG,
+                                BioScaleFinalAge.1,
+                                fwAge,
+                                swAge,
+                                Age,
+                                totalAge,
+                                BY,
+                                releaseGroup,
+                                lenCat)
+```
+
+
+```{r eval=FALSE, include=FALSE}
+write.csv(trap,"SY25STHD_trap.csv")
+```
+
+#Paste the following code in console for it to run:
+
+##Check tht species and time period correct. Convert CollectionDate into readable date format. Corey's RMD file checks this in original data but good to check here on formatted data
+table(trap$LGDSpecies) # all 3 (STHD) so good
+#trap<-trap %>% mutate(CollectionDate = mdy(CollectionDate)) ##done in coreys script?
+summary(trap$CollectionDate) #STHD run period is 7/1 of previous SY to 6/30 of current SY, good
+##CMB 10-1-21: was throwing an error, so changed ymd() to mdy() to match inputs at top of page.
+
+The following is for viewing specific sample sizes:
+###ook at the number of samples (trapped fish) per week (stat week = Mon-Fri for spring-summer run CHNK since trap closed on wkends)
+trap %>% count(sWeek)
+
+###CHECK FOR VALID ENTRIES
+
+#the adipose status column. This should only have values of "AD" and "AI" and  should add up to total fish. Corey's RMD file checks this on original data query but good to check here on formatted data
+trap %>% count(LGDMarkAD)
+
+#check out the sample sizes that will be used in the decomposition estimates for wild fish:
+#first, how many fish have a GenStock assignment in the trap data (TRUE = have a value, FALSE = no value). check that they sum to total.
+trap %>% count(!is.na(GenStock))
+#   !is.na(GenStock) n
+#1            FALSE 9754
+#2             TRUE 1546
+
+#look at each of the secondary variables (aka how many fish have a GenStock AND this other variable). Check that they sum to total.
+trap %>% count(!is.na(GenStock), !is.na(GenSex))
+#!is.na(GenStock) !is.na(GenSex)    n
+#1            FALSE          FALSE 6596
+#2            FALSE           TRUE 3158
+#3             TRUE           TRUE 1546; so all fish assigned to GenStock also assigned to sex
+
+#Size. Check that they sum to toal
+trap %>% count(!is.na(GenStock), !is.na(lenCat))
+#!is.na(GenStock) !is.na(lenCat)    n
+#1            FALSE           TRUE 9754
+#2             TRUE           TRUE 1546; 1546 fish have GenStock, sex, and lencat
+
+#Check that they sum to total
+trap %>% count(!is.na(GenStock), !is.na(Age))
+#!is.na(GenStock) !is.na(Age)    n
+#1            FALSE       FALSE 9735
+#2            FALSE        TRUE   19
+#3             TRUE       FALSE  178 #these fish can cause problems during EASE modeling
+#4             TRUE        TRUE 1368 #1368 with both GenStock and Age, expected to be lower because there are less fish that get assigned an age compared to a sex.
+
+#Since the age categories are linked, the number of fish that have a 1) GenStock and swAge and 2) GenStock and Brood Year should be the same as the # of fish that have Genstock and Age. Check that they sum to total.
+trap %>% count(!is.na(GenStock), !is.na(swAge))
+#!is.na(GenStock) !is.na(swAge)    n
+#1            FALSE         FALSE 9735
+#2            FALSE          TRUE   19
+#3             TRUE         FALSE  178
+#4             TRUE          TRUE 1368
+
+#Check that they sum to total.
+trap %>% count(!is.na(GenStock), !is.na(BY))
+#!is.na(GenStock) !is.na(BY)    n
+#1            FALSE      FALSE 9735
+#2            FALSE       TRUE   19
+#3             TRUE      FALSE  178
+#4             TRUE       TRUE 1368
+
+
+#and if we want to see the number of fish that have ALL of these variables (TRUE = has it, FALSE = doesn't have it). Check that they sum to total
+trap %>% count(!is.na(GenStock), !is.na(Age), !is.na(swAge), !is.na(BY), !is.na(LGDFLmm), !is.na(GenSex)) 
+#!is.na(GenStock) !is.na(Age) !is.na(swAge) !is.na(BY) !is.na(LGDFLmm) !is.na(GenSex)    n
+#1            FALSE       FALSE         FALSE      FALSE            TRUE          FALSE 6577
+#2            FALSE       FALSE         FALSE      FALSE            TRUE           TRUE 3158
+#3            FALSE        TRUE          TRUE       TRUE            TRUE          FALSE   19
+#4             TRUE       FALSE         FALSE      FALSE            TRUE           TRUE  178
+#5             TRUE        TRUE          TRUE       TRUE            TRUE           TRUE 1368
+#^ the last line of the above output shows that in the trap dataset we have 1368 wild fish that have ALL of the required variables (TRUE): a GenStock, an Age, a swAge, a Brood Year, a Length, and a Sex.
+
+write.csv(trap, paste0("SY", sy, spp, "_trap.csv"), row.names = F)
+## Run getwd(). This is where the .csv saved to.
+getwd()
+
