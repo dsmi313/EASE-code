@@ -1,0 +1,607 @@
+##DATA PREP
+
+#load packages:
+library(escapeLGD)
+library(tidyverse)
+#library(lubridate)
+#library(devtools)
+#devtools::install_github("delomast/escapeLGD")
+
+#steelhead example, but some places might have CHNK and STHD
+setwd("O:/LGD Escapement Model/BEERS/SY2022/STHD/Input Files/Input 1 - Trap Data")
+#_________________________
+### 1) DEFINE START AND END DATES OF THE ANALYSIS
+sy <- 2023
+spp <- "STHD"
+if(spp == "STHD"){
+  start <- mdy(paste0("7/1/", sy - 1)) #STHD dates are from 7/1/22 - 6/30/23
+  end <- mdy(paste0("6/30/", sy))
+} else {
+  start <- mdy(paste0("3/1/", sy)) #CHNK dates are from 3/1 - 8/17/22
+  end <- mdy(paste0("8/17/", sy))
+}
+
+
+# QAQC PBT tag rates ------------------------------------------------------
+tagRates<-read.csv('C:/Users/nicolette.beeken/OneDrive - State of Idaho/Documents/Nampa Anadromous Fisheries Research/LGR EASE (adult) analysis_Beeken/EASE data/SY2024 STHD/Input file prep/PBT.tagRates/SY2024STHD.Rgroup_TagRates.csv')
+
+# standardize column names if needed
+colnames(tagRates) <- c("group", "tagRate")
+
+#QAQC step 1 in EASE input file instructions.doc
+tagRates<-tagRates %>% mutate(tagRate = as.numeric(tagRate)) %>%  
+  filter(tagRate > 0, !is.na(tagRate))
+summary(tagRates$tagRate) #should be >0 and at most 1; no NAs; and only 1 tag rate per grp. ok
+
+#CHECK THAT ALL ASSIGNED PBT SAMPLES (in trap dataset) HAVE DEFINED TAG RATES
+#The "NAs introduced by coercion" warning is because some of the 
+#tag rates were not numbers. These were filtered out in the 
+#following filter call. Now let's make sure that all PBT assigned samples (fish with a release grp) in 
+#the trap dataset have defined tag rates. (QAQC step 2 in EASE input file instructions.doc)
+
+#load final trap data
+trap<-read.csv('C:/Users/nicolette.beeken/OneDrive - State of Idaho/Documents/Nampa Anadromous Fisheries Research/LGR EASE (adult) analysis_Beeken/EASE data/SY2024 STHD/Final inputs/SY2024STHD_trap.csv')
+
+# should have 0 rows
+trap %>% count(releaseGroup) %>% left_join(tagRates, by = c("releaseGroup" = "group")) %>% 
+  mutate(tagRate = as.numeric(tagRate)) %>%
+  filter(is.na(tagRate), !is.na(releaseGroup), releaseGroup != "Unassigned") #ok
+
+#So we have some samples that are missing tag rates. 
+#We need to find them and add them to the tagRates object.
+#tagRates <- tagRates %>% bind_rows(
+# tibble(group = c("2017-CLWH-SFCLW-NFClearwaterR-AD","2017-DWOR-DWOR-ClearwaterR","2017-KOOS-KOOS-ClearCr"),
+# tagRate = c(.7732, .9946,.9958)))
+# should have 0 rows
+#trap %>% count(releaseGroup) %>% left_join(tagRates, by = c("releaseGroup" = "group")) %>% 
+# mutate(tagRate = as.numeric(tagRate)) %>%
+#filter(is.na(tagRate), !is.na(releaseGroup), releaseGroup != "Unassigned")
+
+#QAQC step 3 in EASE input file instructions.doc
+# this should be TRUE, otherwise you have duplicates 
+n_distinct(tagRates$group) == nrow(tagRates) #ok
+
+write.csv(tagRates, 'SY2024STHD_tagRates.csv',row.names = F)
+
+
+# Format PIT-tag data -----------------------------------------------------
+pitData <- read.csv('C:/Users/nicolette.beeken/OneDrive - State of Idaho/Documents/Nampa Anadromous Fisheries Research/LGR EASE (adult) analysis_Beeken/EASE data/SY2024 STHD/Input file prep/PIT.tag/SY2024STHD_PITdata_lgr_night_reasc_daily.csv')
+
+#This data has been filtered/processed to have one row for every unique ascension not unique fish.
+#Some cols defined:
+#1-The stock group (upper or lower for steelhead) the PIT tag belongs to for purposes of fallback rates
+#2-The date the ascension occurred
+#3-The tagID
+#4-The time period, day (counting window open) or night (window closed), the ascension occurred
+#5-Whether this ascension resulted in a later fall back (TRUE) or 
+#not (FALSE). In other words TRUE if the fish later re-ascended, and 
+#FALSE if it did not. Note that because we are running this model without 
+#accounting for fallback withOUT reascension, this column could also 
+#represent whether the PIT tag had previously ascended (TRUE) or not (FALSE)
+
+#Let's make sure the period column only includes D or N (no NAs) and laterAscend only includes TRUE or FALSE (no NAs).
+pitData %>% count(Period) #ok
+pitData %>% count(laterAscend)#ok
+
+pitData <- pitData %>% mutate(Date = mdy(Date)) #CMB 10-4-21: changed ymd to mdy to fit with above...
+colnames(pitData)[which(names(pitData) == "WeekNum")] <- "sWeek" #change WeekNum to sWeek if needed
+
+#12/3/22 CMB - create sWeek column if haven't done already:
+pitData <- pitData %>% mutate(y = year(Date), w = sWeek) %>% #CMB 10-1-21: changed w= from CollectionDate to WeekNumber bc we already specified stat wk in that column.
+  arrange(y, w) %>% mutate(sWeek = paste0(y, "_", w))
+
+# fallback - creating another data frame from pitData that has sums of reascends and total passes per statistical week. 
+fullRe <- pitData %>% 
+  group_by(stockGroup, sWeek) %>%
+  summarise(totalPass = length(TagID), numReascend = sum(laterAscend), .groups = "drop") %>% 
+  select(sWeek, stockGroup, numReascend, totalPass) #summing Trues in laterAscend; this df does not include all sweeks in the yr. only includes sweeks with PIT-tag detections
+
+fullNi <- pitData %>% 
+  group_by(sWeek) %>% 
+  summarise(totalPass = length(TagID), nightPass = sum(Period == "N"), .groups = "drop") %>%
+  select(sWeek, nightPass, totalPass)
+
+
+#make sure there is a wc entry for every statistical week and stock group for the fallback input, even if it's 0. We'll do that using
+#the window count data as it has all statistical weeks in it.
+#read in final window count input file
+wc<-read.csv('C:/Users/nicolette.beeken/OneDrive - State of Idaho/Documents/Nampa Anadromous Fisheries Research/LGR EASE (adult) analysis_Beeken/EASE data/SY2024 STHD/Final inputs/SY2024STHD_wc.csv')
+
+fullReComplete <- tibble()
+for(g in unique(fullRe$stockGroup)){
+  fullReComplete <- fullReComplete %>% bind_rows(
+    wc %>% full_join(fullRe %>% filter(stockGroup == g), by = "sWeek") %>% 
+      mutate(across(c(numReascend, totalPass), replace_na, 0)) %>%
+      mutate(stockGroup = replace_na(stockGroup, g))
+  )
+} #adding sweeks that are in wc and not in fullRe to fullRe. So fullReComplete (like wc) will have all 53 sweeks in the yr for each stock. If no PIT-tag detections for that sweek and stock, then numReascend and totalPass will be set to 0
+# should be 0. IF NOT, you have PIT tagged fish passing when window counts aren't in wc
+sum(is.na(fullReComplete$wc))#ok
+
+#columns you need
+fullReComplete <- fullReComplete %>% select(-wc) #removes wc column; should have 106 rows
+fullReComplete
+#> # A tibble: 108 x 4
+#>    sWeek   stockGroup numReascend totalPass
+#>    <chr>   <chr>            <dbl>     <dbl>
+#>  1 2019_26 lower                0         0
+#>  2 2019_27 lower                0         0
+#>  3 2019_28 lower                0         0
+#>  4 2019_29 lower                0         0
+#>  5 2019_30 lower                0         1
+#>  6 2019_31 lower                0         0
+#>  7 2019_32 lower                0         0
+#>  8 2019_33 lower                0         0
+#>  9 2019_34 lower                0         1
+#> 10 2019_35 lower                0         0
+#> # ... with 98 more rows
+
+fullNiComplete <- wc %>% full_join(fullNi, by = "sWeek") %>% 
+  mutate(across(c(nightPass, totalPass), replace_na, 0))
+
+# should be 0, if not you have PIT tagged fish passing when window counts aren't in wc
+sum(is.na(fullNiComplete$wc)) #ok
+
+fullNiComplete <- fullNiComplete %>% select(-wc) #removes wc column; should have 53 rows
+fullNiComplete
+#> # A tibble: 54 x 3
+#>    sWeek   nightPass totalPass
+#>    <chr>       <dbl>     <dbl>
+#>  1 2019_26         0         0
+#>  2 2019_27         0         2
+#>  3 2019_28         0        11
+#>  4 2019_29         0        18
+#>  5 2019_30         0        24
+#>  6 2019_31         1        17
+#>  7 2019_32         0        17
+#>  8 2019_33         2        12
+#>  9 2019_34         1        23
+#> 10 2019_35         0        32
+#> # ... with 44 more rows
+
+#Now the two inputs you have are fullReComplete (fallback/reascension data) and fullNiComplete (nighttime passage data)
+#Save these inputs as csv files:
+write.csv(fullReComplete, "SY2024STHD_fallback_fullReComplete.csv",row.names = F)
+write.csv(fullNiComplete, "SY2024STHD_night_fullNiComplete.csv",row.names = F)
+
+
+# Format GSI data ---------------------------------------------------------
+#If we are NOT incorporating GSI uncertainty, we also need to 
+#examine the GSI column. If we are, then we need a column linking samples to 
+#rows of a separate table with GSI assignments. 
+#Let's first look at the GSI assignment table:
+# load it in:
+gsiDraws <- read_tsv("C:/Users/nicolette.beeken/OneDrive - State of Idaho/Documents/Nampa Anadromous Fisheries Research/LGR EASE (adult) analysis_Beeken/EASE data/SY2024 STHD/Input file prep/GSI/SY2024STHDgsiDraws_AllFish.txt")
+
+gsiDraws
+#> # A tibble: 7,795 x 2,001
+#>    MasterID boot_1 boot_2 boot_3 boot_4 boot_5 boot_6 boot_7 boot_8 boot_9
+#>       <dbl> <chr>  <chr>  <chr>  <chr>  <chr>  <chr>  <chr>  <chr>  <chr> 
+#>  1   427513 <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>  
+#>  2   427573 <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>  
+#>  3   427587 LSNAKE LSNAKE LSNAKE LSNAKE LSNAKE LSNAKE LSNAKE LSNAKE GRROND
+#>  4   427600 LSNAKE LSNAKE LSNAKE LSNAKE LSNAKE LSNAKE LSNAKE LSNAKE LSNAKE
+#>  5   427618 <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>  
+#>  6   427724 GRROND LSNAKE LSNAKE LSNAKE LSNAKE LSNAKE LSNAKE LSNAKE LSNAKE
+#>  7   427781 <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>  
+#>  8   427786 <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>  
+#>  9   427787 <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>  
+#> 10   427798 <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>  
+#> # ... with 7,785 more rows, and 1,991 more variables: boot_10 <chr>,
+#> #   boot_11 <chr>, boot_12 <chr>, boot_13 <chr>, boot_14 <chr>, boot_15 <chr>,
+#> #   boot_16 <chr>, boot_17 <chr>, boot_18 <chr>, boot_19 <chr>, boot_20 <chr>,
+#> #   boot_21 <chr>, boot_22 <chr>, boot_23 <chr>, boot_24 <chr>, boot_25 <chr>,
+#> #   boot_26 <chr>, boot_27 <chr>, boot_28 <chr>, boot_29 <chr>, boot_30 <chr>,
+#> #   boot_31 <chr>, boot_32 <chr>, boot_33 <chr>, boot_34 <chr>, boot_35 <chr>,
+#> #   boot_36 <chr>, boot_37 <chr>, boot_38 <chr>, boot_39 <chr>, boot_40 <chr>,
+#> #   boot_41 <chr>, boot_42 <chr>, boot_43 <chr>, boot_44 <chr>, boot_45 <chr>,
+#> #   boot_46 <chr>, boot_47 <chr>, boot_48 <chr>, boot_49 <chr>, boot_50 <chr>,
+#> #   boot_51 <chr>, boot_52 <chr>, boot_53 <chr>, boot_54 <chr>, boot_55 <chr>,
+#> #   boot_56 <chr>, boot_57 <chr>, boot_58 <chr>, boot_59 <chr>, boot_60 <chr>,
+#> #   boot_61 <chr>, boot_62 <chr>, boot_63 <chr>, boot_64 <chr>, boot_65 <chr>,
+#> #   boot_66 <chr>, boot_67 <chr>, boot_68 <chr>, boot_69 <chr>, boot_70 <chr>,
+#> #   boot_71 <chr>, boot_72 <chr>, boot_73 <chr>, boot_74 <chr>, boot_75 <chr>,
+#> #   boot_76 <chr>, boot_77 <chr>, boot_78 <chr>, boot_79 <chr>, boot_80 <chr>,
+#> #   boot_81 <chr>, boot_82 <chr>, boot_83 <chr>, boot_84 <chr>, boot_85 <chr>,
+#> #   boot_86 <chr>, boot_87 <chr>, boot_88 <chr>, boot_89 <chr>, boot_90 <chr>,
+#> #   boot_91 <chr>, boot_92 <chr>, boot_93 <chr>, boot_94 <chr>, boot_95 <chr>,
+#> #   boot_96 <chr>, boot_97 <chr>, boot_98 <chr>, boot_99 <chr>, boot_100 <chr>,
+#> #   boot_101 <chr>, boot_102 <chr>, boot_103 <chr>, boot_104 <chr>,
+#> #   boot_105 <chr>, boot_106 <chr>, boot_107 <chr>, boot_108 <chr>,
+#> #   boot_109 <chr>, ...
+
+#add NAs to all draws for MasterIDs (ad-clipped fish and AI fish w/o a biosamplesID) that were added into gsiDraws file:
+#When getting row numbers from Excel, SUBTRACT 1 SINCE r DOESNT COUNT 1ST ROW OF COLUMN NAMES IN ROW COUNT. 
+#check that correct rows are used by using the 2 extractions below and viewing the read-in GSI draws file in Excel
+gsiDraws[3795,1:5] #good
+gsiDraws[13410,1:5]#good
+
+gsiDraws[3795:13410,2:2001] <- NA #[row range, column range]. row range should 
+#be the first and last MasterID that was added to GSI file, and the 
+#column range should be boot_1 through boot_2000.
+
+#Our table of GSI draws has the first column of MasterID and 
+#all other columns are posterior draws of GSI assignments. 
+#There should also be a MasterID column in the trap data, let's make sure that 
+#all samples in one are in the other.
+#load in final trap input file
+trap<-read.csv('C:/Users/nicolette.beeken/OneDrive - State of Idaho/Documents/Nampa Anadromous Fisheries Research/LGR EASE (adult) analysis_Beeken/EASE data/SY2024 STHD/Final inputs/SY2024STHD_trap.csv')
+
+# these should both be 0
+sum(!trap$MasterID %in% gsiDraws$MasterID)#ok
+#> [1] 0
+sum(!gsiDraws$MasterID %in% trap$MasterID)#ok
+#> [1] 0
+
+#And let's look at just the first iterations values
+trap %>% mutate(gsiAssignment = gsiDraws[match(MasterID, gsiDraws[[1]]),][[2]]) %>%
+  count(LGDMarkAD, gsiAssignment)
+#   LGDMarkAD gsiAssignment     n
+#1         AD          <NA> 10807
+#2         AI        GRROND   802
+#3         AI        IMNAHA   186
+#4         AI        LOCLWR    68
+#5         AI        LOSALM    96
+#6         AI        LSNAKE   416
+#7         AI        MFSALM   242
+#8         AI        SFCLWR  1001
+#9         AI        SFSALM    78
+#10        AI        UPCLWR   331
+#11        AI        UPSALM   397
+#12        AI          <NA>   107
+
+#It looks like none of the AD fish have values, which is fine - 
+#we don't split them by GSI assignment. And it looks like only a 
+#few AI fish which failed genotyping are missing the values - again this is 
+#good, we want GSI assignments for all the AI fish, 
+#regardless of PBT assignment.
+
+##### IMPORTANT!!!
+#Now, the fish that HAVE a GenStock but DONT have an Age can cause errors in the model because occasionally it will come across a fish in the gsiDraws that is the only fish in a GenStock in a specific stratum and it doesn't have an age, so the model doesn't have any age data for that stock in that stratum. To fix this:
+#Set the genstock (across all iterations in gsiDraws) to NA (treat it as missing) for all unmarked, untagged fish without ages. 
+#You can do this using the code below. THIS STILL ALLOWS THE FISH TO BE USED TO INFORM THE HNC vs W PROPORTIONS,
+#But avoids the problem of having incomplete cases
+
+#CMB: this code finds MASTERIDs of fish that have a Genstock but no age (if we wanted to eliminate all fish without ages from the gsiDraws data,
+#DON'T USE! R CODE KEPT FOR FYI!)
+#gsi_draws_NA_age <- gsiDraws # create a copy of gsiDraws to modify 
+#WnoAge <- trap %>% filter(is.na(Age), LGDMarkAD == "AI", is.na(physTag) | !physTag, !is.na(releaseGroup) & releaseGroup == "Unassigned") %>%
+  #pull(MasterID) # List of MasterIDs of unmarked, untagged fish with no age data 
+
+#gsi_draws_NA_age[gsi_draws_NA_age$MasterID %in% WnoAge,-1] <- NA # set fish w/o ages as missing 
+# run est_comp using gsi_draws_NA_age on line 566 of Step 3 - estimate escapement R file
+#^use the gsi_draws_NA_age object when creating the est_comp object on line 566 of Step 3 - estimate escapement
+
+
+#CMB: UPDATED 11-10-21: the code below finds MASTERIDs of problem fish that will trigger an error while 
+#running HNC_expand_unkGSI() in est_comp. 
+#(aka Fish that are the only one of their stock in a single stratum tht also don't have an age).
+gsi_draws_NA_probfish <- gsiDraws # create a copy of gsiDraws to modify 
+
+#read in final trap strata
+stratComp<-read.csv('C:/Users/nicolette.beeken/OneDrive - State of Idaho/Documents/Nampa Anadromous Fisheries Research/LGR EASE (adult) analysis_Beeken/EASE data/SY2024 STHD/Final inputs/BUILD_stratComp_SY2024STHD.csv')
+
+tempdata <- trap %>% as_tibble() %>%
+  filter(LGDMarkAD == "AI", is.na(physTag) | !physTag, !is.na(releaseGroup),
+         releaseGroup == "Unassigned") %>% # get only unmarked untagged fish
+  left_join(stratComp, by = "sWeek") %>%
+  select(MasterID, stratum, Age) %>% # select only the MasterID, stratum, and Age
+  inner_join(gsiDraws %>% filter(!is.na(.[[2]])), by = "MasterID") %>%# add the gsiDraws and only include fish with GSI assignments
+  select(MasterID, stratum, Age, everything()) # make sure column order is the way we want it
+strata <- unique(tempdata$stratum)
+# loop through each iteration and find problematic cases
+problemIterations <- tibble() # this will have a row for each problem case and iteration combination
+for(i in 4:ncol(tempdata)){
+  GSIcombos <- tempdata[,c(2,i)] %>% distinct()
+  GSI_AgeCombos <- tempdata[,c(2,3,i)] %>% filter(!is.na(Age)) %>%
+    select(-Age) %>% distinct() %>% mutate(present = TRUE)
+  probCases <- GSIcombos %>%
+    anti_join(GSI_AgeCombos, by = c("stratum", colnames(tempdata)[i]))
+  if(nrow(probCases) < 1) next
+  # add MasterIDs to problem list
+  problemIterations <- problemIterations %>% bind_rows(
+    tempdata %>% semi_join(probCases, by = c("stratum", colnames(tempdata)[i])) %>%
+      select(MasterID, stratum) %>% mutate(iteration = i)
+  )
+}
+# THIS object will have a row for each problem case: these are the MasterIDs that need to be changed to NA
+problemMasterIDs <- problemIterations %>% select(1:2) %>%
+  distinct
+
+problemfishlist <- problemMasterIDs %>% 
+  pull(MasterID) #create a list of the problem fish, not an object
+
+gsi_draws_NA_probfish [gsi_draws_NA_probfish$MasterID %in% problemfishlist,-1] <- NA # set fish w/o ages as missing 
+
+write.csv(gsiDraws,'SY2024STHD_GSIdraws.csv',row.names = F)
+write.csv(gsi_draws_NA_probfish,'SY2024STHDGSIdraws_NAprobfish.csv',row.names = F)
+
+
+# Format Night Passage Strata ---------------------------------------------
+#We now have to define strata in which we want to 
+#estimate the parameters of interest.
+
+################ Nighttime Passage Strata
+#General guidelines in order of importance:
+  #All strata must have at least one ascension
+  #Don't combine weeks for which environmental conditions affecting nighttime passage are meaningfully different (Fall/spring for STHD)
+  #Avoid strata with 0% or 100% observed nighttime passage 
+      #If observation is 0% or 100%, there will be no variation in the bootstraps
+  #100 or more total ascensions detected 
+      #100 is not a magic number. Just make sure it's a reasonable sample size.
+
+#We are going to write out a csv template for manually assigning strata in your favorite spreadsheet program. If you would rather assign strata in R, excellent, go ahead!
+  # make template
+  #stratNight <- fullNiComplete %>% mutate(stratum = 1) %>% select(sWeek, stratum, nightPass, totalPass)
+# if you want to use excel, write out file
+#write.csv(stratNight, "SY2024STHD_Build_StratNight.csv",row.names = F)
+
+#fname <- paste0("BUILD_stratNight_", spp, "_", sy, ".csv") #Tom code
+#write.csv(stratNight, fname, row.names = FALSE) #Tom code
+
+#Then edit the "stratum" column in a spreadsheet program to using the guidelines.
+# and load back in and make checks
+#stratNight <- read.csv("BUILD_stratNight_SY2022 STHD.csv")
+#> 
+#> -- Column specification 
+#> cols(
+#>   sWeek = col_character(),
+#>   stratum = col_double(),
+#>   nightPass = col_double(),
+#>   totalPass = col_double()
+#> )
+# evaluate chosen strata
+#eval <- stratNight %>% group_by(stratum) %>% 
+#  summarise(across(c(nightPass, totalPass), sum), .groups = "drop")
+#eval %>% mutate(noVar = nightPass == totalPass | nightPass == 0) # to manually inspect
+#> # A tibble: 10 x 4
+#>    stratum nightPass totalPass noVar
+#>      <dbl>     <dbl>     <dbl> <lgl>
+#>  1       1         3       100 FALSE
+#>  2       2         4       119 FALSE
+#>  3       3         9        99 FALSE
+#>  4       4        16       210 FALSE
+#>  5       5         7       206 FALSE
+#>  6       6         8       150 FALSE
+#>  7       7         7       148 FALSE
+#>  8       8        10       139 FALSE
+#>  9       9        16       128 FALSE
+#> 10      10        22        70 FALSE
+#if(any(eval$totalPass < 1)) print("strata not acceptable, must have 1 or more totalPass in all")
+# if fail, go back and reassign strata
+#stratNight <- stratNight %>% select(sWeek, stratum) # select needed columns
+#stratNight
+#> # A tibble: 54 x 2
+#>    sWeek   stratum
+#>    <chr>     <dbl>
+#>  1 2019_26       1
+#>  2 2019_27       1
+#>  3 2019_28       1
+#>  4 2019_29       1
+#>  5 2019_30       1
+#>  6 2019_31       1
+#>  7 2019_32       1
+#>  8 2019_33       1
+#>  9 2019_34       2
+#> 10 2019_35       2
+#> # ... with 44 more rows
+
+
+# Format Trap Strata ------------------------------------------------------
+#######Composition Strata - for the trap data
+#General guidelines:
+  #All strata must have at least one trapped fish
+  #Don't combine when environmental variables thought to affect composition change
+      #Fall/spring periods for steelhead
+#50 or more genotyped AD samples and 50 or more genotyped AI samples
+    #Not a magic number. Just make sure it's a reasonable sample size.
+
+#read in final window count and trap data
+wc<-read.csv('C:/Users/nicolette.beeken/OneDrive - State of Idaho/Documents/Nampa Anadromous Fisheries Research/LGR EASE (adult) analysis_Beeken/EASE data/SY2024 STHD/Final inputs/SY2024STHD_wc_unexpanded.csv')
+
+trap<-read.csv('C:/Users/nicolette.beeken/OneDrive - State of Idaho/Documents/Nampa Anadromous Fisheries Research/LGR EASE (adult) analysis_Beeken/EASE data/SY2024 STHD/Final inputs/SY2024STHD_trap.csv')
+
+# make template
+stratComp <- trap %>% group_by(sWeek) %>% 
+  summarise(AD = sum(LGDMarkAD == "AD", na.rm = TRUE),
+            AI = sum(LGDMarkAD == "AI", na.rm = TRUE),
+            knownHNC = sum(LGDMarkAD == "AI" & (physTag | (!is.na(releaseGroup) & releaseGroup != "Unassigned")), na.rm = TRUE),
+            AD_genotyped = sum(LGDMarkAD == "AD" & !is.na(releaseGroup)),
+            AI_genotyped = sum(LGDMarkAD == "AI" & !is.na(releaseGroup)))
+stratComp <- wc %>% full_join(stratComp, by = "sWeek") %>% 
+  mutate(across(c(AD, AI, knownHNC, AD_genotyped, AI_genotyped), replace_na, 0)) %>% 
+  mutate(stratum = 1)
+# should be 0, if not you have trapped fish when window counts aren't in wc
+sum(is.na(stratComp$wc))#ok
+
+
+#write dataframe to csv file:
+write.csv(stratComp, "BUILD_stratComp_SY2024STHD.csv",row.names = F) #CMB code
+
+#fname <- paste0("BUILD_stratComp_", spp, "_", sy, ".csv") #Tom code
+# write out file
+#write.csv(stratComp, fname, row.names = FALSE)
+
+#Then edit the "stratum" column in a spreadsheet program to 
+#assign following the guidelines.
+# and load back in
+#stratComp <- read.csv("BUILD_stratComp_SY2022 STHD.csv")
+#> 
+#>Column specification 
+#> cols(
+#>   sWeek = col_character(),
+#>   stratum = col_double(),
+#>   wc = col_double(),
+#>   AD = col_double(),
+#>   AI = col_double(),
+#>   knownHNC = col_double(),
+#>   AD_genotyped = col_double(),
+#>   AI_genotyped = col_double()
+#> )
+# evaluate chosen strata
+#eval <- stratComp %>% group_by(stratum) %>% 
+#  summarise(across(c(wc, AD, AI, knownHNC, AD_genotyped, AI_genotyped), sum), .groups = "drop")
+#eval %>% as.data.frame # to manually inspect
+#>    stratum   wc  AD  AI knownHNC AD_genotyped AI_genotyped
+#> 1        1 1389 157 268        5           47          266
+#> 2        2 1503 650 553       20           68          551
+#> 3        3 1881 294 153       13          146          153
+#> 4        4 4912 851 431       48          425          431
+#> 5        5 4949 905 388       78          487          388
+#> 6        6 3857 689 280       67          394          280
+#> 7        7 2838 521 228       65          324          228
+#> 8        8 2220 402 215       67          254          214
+#> 9        9 1517 253 138       35          147          137
+#> 10      10 1765 107  61       22           59           60
+#> 11      11 1846 162  89       32           80           86
+#if(any((eval$AD + eval$AI) < 1)) print("strata not acceptable, must have 1 or more trapped fish in all")
+# if fail, go back and reassign strata
+
+#stratComp <- stratComp %>% select(sWeek, stratum) # select columns you need 
+#stratComp
+#> # A tibble: 54 x 2
+#>    sWeek   stratum
+#>    <chr>     <dbl>
+#>  1 2019_26       1
+#>  2 2019_27       1
+#>  3 2019_28       1
+#>  4 2019_29       1
+#>  5 2019_30       1
+#>  6 2019_31       1
+#>  7 2019_32       1
+#>  8 2019_33       1
+#>  9 2019_34       2
+#> 10 2019_35       2
+#> # ... with 44 more rows
+
+
+# Format Fallback-Reascension Strata --------------------------------------
+#General guidelines:
+  #Remember that the strata for each stock group (lower and upper) are separate
+  #Each composition stratum must correspond to one and only one fallback stratum for a given stock group
+  #All strata must have at least one ascension
+  #Don't combine weeks for which environmental conditions affecting fallback rates are meaningfully different (fall/spring periods)
+  #Avoid strata with 0% or 100% observed fallback 
+      #If observation is 0% or 100%, there will be no variation in the bootstraps
+  #100 or more total ascensions detected 
+      #100 is not a magic number. Just make sure it's a reasonable sample size.
+  #Will be smaller by necessity for smaller stock groups.
+
+#load in presumably final (needs review at this pt) comp strata file and final input file fullReComplete (fallback data)
+#stratComp<-read.csv('Nampa Anadromous Fisheries Research/LGR EASE (adult fish) analysis_Beeken/SY2023 STHD_data & notes/Input file prep/Strata files/BUILD_stratComp_SY2023 STHD.csv')
+#fullReComplete<-read.csv('Nampa Anadromous Fisheries Research/LGR EASE (adult fish) analysis_Beeken/SY2023 STHD_data & notes/Final input files/SY2023STHD_fallback_fullReComplete.csv')
+
+# make template
+#stratFallback <- fullReComplete %>% mutate(stratum = 1) %>% select(stockGroup, sWeek, stratum, numReascend, totalPass) %>%
+ # left_join(stratComp %>% rename(compStratum = stratum), by = "sWeek") %>% 
+  #select(stockGroup, sWeek, compStratum, stratum, numReascend, totalPass)
+
+# write out file
+#write.csv(stratFallback, "BUILD_stratFallback_SY2023 STHD.csv",row.names = F) #CMB code
+#fname <- paste0("BUILD_stratFallback_", spp, "_", sy, ".csv") #Tom code
+#write.csv(stratFallback, fname, row.names = FALSE)
+
+#Then edit the "stratum" column in a spreadsheet program to 
+#assign following the guidelines.
+# load back in
+#stratFallback <- read.csv("BUILD_stratFallback_SY2022 STHD.csv")
+#> 
+#> -- Column specification 
+#> cols(
+#>   stockGroup = col_character(),
+#>   sWeek = col_character(),
+#>   compStratum = col_double(),
+#>   stratum = col_double(),
+#>   numReascend = col_double(),
+#>   totalPass = col_double()
+#> )
+# evaluate chosen strata
+#eval <- stratFallback %>% group_by(stockGroup, stratum) %>% 
+ # summarise(across(c(numReascend, totalPass), sum), .groups = "drop")
+#eval %>% mutate(noVar = numReascend == totalPass | numReascend == 0) # to manually inspect
+#> # A tibble: 10 x 5
+#>    stockGroup stratum numReascend totalPass noVar
+#>    <chr>        <dbl>       <dbl>     <dbl> <lgl>
+#>  1 lower            1          12        62 FALSE
+#>  2 lower            2           1        12 FALSE
+#>  3 upper            1          19       100 FALSE
+#>  4 upper            2          18       115 FALSE
+#>  5 upper            3           3        97 FALSE
+#>  6 upper            4           1       200 FALSE
+#>  7 upper            5           2       190 FALSE
+#>  8 upper            6           2       278 FALSE
+#>  9 upper            7          11       258 FALSE
+#> 10 upper            8           1        58 FALSE
+#if(any(eval$totalPass < 1)) print("strata not acceptable, must have 1 or more totalPass in all")
+
+#stratFallback <- stratFallback %>% select(stockGroup, sWeek, stratum) # select needed columns
+
+# each composition stratum must have one and only one fallback stratum
+#checkStrata(stratAssign_comp = stratComp, stratAssign_fallback = stratFallback)
+#> Strata are compatible
+# if fail, go back and reassign strata
+#stratFallback
+#> # A tibble: 108 x 3
+#>    stockGroup sWeek   stratum
+#>    <chr>      <chr>     <dbl>
+#>  1 lower      2019_26       1
+#>  2 lower      2019_27       1
+#>  3 lower      2019_28       1
+#>  4 lower      2019_29       1
+#>  5 lower      2019_30       1
+#>  6 lower      2019_31       1
+#>  7 lower      2019_32       1
+#>  8 lower      2019_33       1
+#>  9 lower      2019_34       1
+#> 10 lower      2019_35       1
+#> # ... with 98 more rows
+
+
+# Save final inputs -------------------------------------------------------
+############ FINAL: SAVE ALL FINAL INPUTS AS A ".RDA" FILE
+#Now you have all the inputs for estimating escapement. 
+#I recommend saving all of the inputs as one ".rda" file first to make the 
+#analysis easily reproducible/editable in the future. Then save each input as it's own .csv file for bookkeeping.
+
+setwd()
+#save ALL final inputs in one .rda file for easy loading into the analysis:
+#save(trap, wc, tagRates, fullNiComplete, fullReComplete, gsi_draws_NA_probfish,
+ #    sthd_splitPITdata, sthd_stockGroup,
+  #   stratComp, stratFallback, stratNight, 
+   #  file = paste0("escapeLGD_FINAL INPUTS_", spp, "_", sy, ".rda"))
+
+#Save each input individually and save to your Final Input Files folder:
+#write.csv(trap, file = paste0("SY",sy,spp,"_trap",".csv"))
+#write.csv(wc, file = paste0("SY",sy,spp,"_wc",".csv"),row.names = FALSE)
+write.csv(tagRates, file = paste0("SY",sy,spp,"_tagRates",".csv"), row.names = F)
+#write.csv(fullReComplete, file = paste0("SY",sy,spp,"_fallback_fullReComplete",".csv"))
+#write.csv(fullNiComplete, file = paste0("SY",sy,spp,"_night_fullNiComplete",".csv"))
+write.csv(gsiDraws, file = paste0("SY",sy,spp,"_gsiDraws",".csv"),row.names = F)
+write.csv(gsi_draws_NA_probfish, file = paste0("SY",sy,spp,"_gsi_draws_NA_probfish",".csv"),row.names = F)
+write.csv(sthd_splitPITdata, file = paste0("SY",sy,spp,"_splitPITdata",".csv"))
+write.csv(sthd_stockGroup, file = paste0("SY",sy,spp,"_stockGroup",".csv"))
+#write.csv(stratComp, file = paste0("SY",sy,spp,"_stratComp",".csv"))
+#write.csv(stratNight, file = paste0("SY",sy,spp,"_stratNight",".csv"))
+#write.csv(stratFallback, file = paste0("SY",sy,spp,"_stratFallback",".csv"))
+
+
+## SAVE ENTIRE WORKSPACE AS .rda FILE!! (Save to "Final Input Files" folder for each species)
+#save.image(file = paste0("SY",sy,spp,"_INPUT FILE PREP_All files done 12-6-22 CMB",".rda"))
+
+#read-in final input files and save all objects as .rda file. NSB 10.27.23. I use this code instead of code above since input files completed on different days
+setwd('C:/Users/nicolette.beeken/OneDrive - State of Idaho/Documents/Nampa Anadromous Fisheries Research/LGR EASE (adult) analysis_Beeken/EASE data/SY2024 STHD/Final inputs')
+
+trap<-read.csv('SY2024STHD_trap.csv')
+wc<-read.csv('SY2024STHD_wc_unexpanded.csv')
+tagRates<-read.csv('SY2024STHD_tagRates.csv')
+fullReComplete<-read.csv('SY2024STHD_fallback_fullReComplete.csv')
+fullNiComplete<-read.csv('SY2024STHD_night_fullNiComplete.csv')
+gsiDraws<-read.csv('SY2024STHD_GSIdraws.csv')
+gsi_draws_NA_probfish<-read.csv('SY2024STHDGSIdraws_NAprobfish.csv')
+sthd_splitPITdata<-read.csv('SY2024STHDsplitByPIT.csv')
+sthd_stockGroup<-read.csv('SY2024STHD_stockGroupKey.csv')
+stratComp<-read.csv('BUILD_stratComp_SY2024STHD.csv')
+stratNight<-read.csv('SY2024STHD_Build_StratNight.csv')
+stratFallback<-read.csv('SY2024STHD_stratFallback.csv')
+
+
