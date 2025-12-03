@@ -373,37 +373,23 @@ Step 3: If a 'S' or 'R' is present in BioScaleFinalAge2 col, check that swAge2 c
 Step 4: Total fish is = between datasets
 #can write code to sum NA's in formatted data
 
-### Convert uncertain ages to NA
-Fish with uncertain ages (containing "?" in fw or sw age) have their ages converted to NA. These fish are kept in the dataset for stock composition (GSI) but excluded from age-specific analyses.
+### Identify fish with uncertain ages (for tracking)
+Fish with uncertain ages (containing "?" in BioScaleFinalAge2) are identified here for reporting. These ages are automatically converted to NA in the age parsing code above (lines 318, 322). Fish remain in dataset for stock composition (GSI) but excluded from age-specific analyses.
 ```{r}
-# Identify fish with uncertain ages by Rear type (for reporting)
+# Identify fish with uncertain ages by Rear type (for reporting only)
 uncertain_age_fish <- FormattedLGTrappingRecords %>%
   filter(!is.na(BioScaleFinalAge2) & str_detect(BioScaleFinalAge2, "\\?")) %>%
   group_by(Rear2) %>%
   summarise(n = n(), .groups = "drop")
 
 # Print breakdown by rear type
-cat("\nFish with uncertain ages (?) by rear type:\n")
+cat("\nFish with uncertain ages (?) in BioScaleFinalAge2 by rear type:\n")
 print(uncertain_age_fish)
 cat("\nTotal fish with uncertain ages:", sum(uncertain_age_fish$n), "\n")
 cat("  - Wild fish (used in EASE):",
     ifelse("W" %in% uncertain_age_fish$Rear2,
            uncertain_age_fish$n[uncertain_age_fish$Rear2 == "W"], 0), "\n")
-cat("\nThese fish will have ages set to NA but remain in dataset for GSI\n")
-
-# Convert uncertain ages to NA (keep the fish, just remove unreliable age data)
-FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>%
-  mutate(
-    BioScaleFinalAge2 = ifelse(str_detect(BioScaleFinalAge2, "\\?"), NA, BioScaleFinalAge2),
-    fwAge2 = ifelse(!is.na(fwAge2) & str_detect(fwAge2, "\\?"), NA, fwAge2),
-    swAge2 = ifelse(!is.na(swAge2) & str_detect(swAge2, "\\?"), NA, swAge2)
-  )
-
-# Verify conversion
-cat("\nFish with '?' in BioScaleFinalAge2 after conversion:",
-    sum(!is.na(FormattedLGTrappingRecords$BioScaleFinalAge2) &
-        str_detect(FormattedLGTrappingRecords$BioScaleFinalAge2, "\\?")),
-    "(should be 0)\n")
+cat("\nNote: These ages already converted to NA by age parsing code (lines 318, 322)\n")
 ```
 
 - ReleaseGroup2: Calculated from Rear2, PBTBYHat2 and PBTRGroup2. The goal here is to remove PBTRGroup from both wild fish and fish without a PBTBYHat designation, call "Unassigned" fish "Unassigned" (we don't want fish that could not be genotyped to hatchery), and finally preserve the RGroup if none of the above is true. In other words, We set release group of hatchery fish to NA when PBTBYHat is NA and set their release group to unassigned when PBTBYHat is unassigned. 
