@@ -201,20 +201,29 @@ weekly_summary <- all_weeks %>%
 # Automatic strata assignment: target 100 genotyped AI fish per stratum
 target <- 100
 
+# Better algorithm: start new stratum when accumulated count exceeds target
 strat <- weekly_summary %>%
   arrange(sWeek) %>%
   mutate(
-    # Calculate running total of genotyped AI fish
-    csum = cumsum(AI_genotyped),
+    stratum = {
+      n_fish <- AI_genotyped
+      strata <- integer(length(n_fish))
+      current_stratum <- 1
+      stratum_total <- 0
 
-    # Divide by target and round up to assign initial strata
-    stratum_raw = ceiling(csum / target),
+      for(i in seq_along(n_fish)) {
+        # If adding this week would exceed target AND we already have some fish,
+        # start a new stratum (unless this week alone exceeds target)
+        if(stratum_total > 0 && stratum_total + n_fish[i] > target) {
+          current_stratum <- current_stratum + 1
+          stratum_total <- 0
+        }
 
-    # Ensure no stratum 0
-    stratum_raw = ifelse(stratum_raw < 1, 1, stratum_raw),
-
-    # Remove gaps in stratum numbers
-    stratum = dense_rank(stratum_raw)
+        strata[i] <- current_stratum
+        stratum_total <- stratum_total + n_fish[i]
+      }
+      strata
+    }
   )
 
 # Check if last stratum is too small (< 50 fish) and merge with previous
