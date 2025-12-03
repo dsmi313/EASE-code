@@ -373,13 +373,10 @@ Step 3: If a 'S' or 'R' is present in BioScaleFinalAge2 col, check that swAge2 c
 Step 4: Total fish is = between datasets
 #can write code to sum NA's in formatted data
 
-### Remove fish with uncertain ages
-Fish with uncertain ages (containing "?" in fw or sw age) are removed from the dataset to ensure age calculations are reliable.
+### Convert uncertain ages to NA
+Fish with uncertain ages (containing "?" in fw or sw age) have their ages converted to NA. These fish are kept in the dataset for stock composition (GSI) but excluded from age-specific analyses.
 ```{r}
-# Count fish before removing uncertain ages
-n_before <- nrow(FormattedLGTrappingRecords)
-
-# Identify fish with uncertain ages by Rear type (important for EASE analysis)
+# Identify fish with uncertain ages by Rear type (for reporting)
 uncertain_age_fish <- FormattedLGTrappingRecords %>%
   filter(!is.na(BioScaleFinalAge2) & str_detect(BioScaleFinalAge2, "\\?")) %>%
   group_by(Rear2) %>%
@@ -392,17 +389,21 @@ cat("\nTotal fish with uncertain ages:", sum(uncertain_age_fish$n), "\n")
 cat("  - Wild fish (used in EASE):",
     ifelse("W" %in% uncertain_age_fish$Rear2,
            uncertain_age_fish$n[uncertain_age_fish$Rear2 == "W"], 0), "\n")
+cat("\nThese fish will have ages set to NA but remain in dataset for GSI\n")
 
-# Remove fish with uncertain ages (containing "?" in BioScaleFinalAge2)
+# Convert uncertain ages to NA (keep the fish, just remove unreliable age data)
 FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>%
-  filter(is.na(BioScaleFinalAge2) | !str_detect(BioScaleFinalAge2, "\\?"))
+  mutate(
+    BioScaleFinalAge2 = ifelse(str_detect(BioScaleFinalAge2, "\\?"), NA, BioScaleFinalAge2),
+    fwAge2 = ifelse(!is.na(fwAge2) & str_detect(fwAge2, "\\?"), NA, fwAge2),
+    swAge2 = ifelse(!is.na(swAge2) & str_detect(swAge2, "\\?"), NA, swAge2)
+  )
 
-# Count fish after removal
-n_after <- nrow(FormattedLGTrappingRecords)
-n_removed_uncertain_age <- n_before - n_after
-
-# Print summary
-cat("\nFish remaining in dataset:", n_after, "\n")
+# Verify conversion
+cat("\nFish with '?' in BioScaleFinalAge2 after conversion:",
+    sum(!is.na(FormattedLGTrappingRecords$BioScaleFinalAge2) &
+        str_detect(FormattedLGTrappingRecords$BioScaleFinalAge2, "\\?")),
+    "(should be 0)\n")
 ```
 
 - ReleaseGroup2: Calculated from Rear2, PBTBYHat2 and PBTRGroup2. The goal here is to remove PBTRGroup from both wild fish and fish without a PBTBYHat designation, call "Unassigned" fish "Unassigned" (we don't want fish that could not be genotyped to hatchery), and finally preserve the RGroup if none of the above is true. In other words, We set release group of hatchery fish to NA when PBTBYHat is NA and set their release group to unassigned when PBTBYHat is unassigned. 
@@ -644,30 +645,6 @@ trap %>% count(!is.na(GenStock), !is.na(Age), !is.na(swAge), !is.na(BY), !is.na(
 #^ the last line of the above output shows that in the trap dataset we have 1368 wild fish that have ALL of the required variables (TRUE): a GenStock, an Age, a swAge, a Brood Year, a Length, and a Sex.
 
 write.csv(trap, paste0("SY", sy, spp, "_trap.csv"), row.names = F)
-
-# Filter gsiDraws file to match cleaned trap data (remove uncertain age fish)
-gsi_file <- "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/OmyLGRU25S_gsiDraws_final.txt"
-if(file.exists(gsi_file)) {
-  cat("\nFiltering gsiDraws to match cleaned trap data...\n")
-  gsiDraws_original <- read_tsv(gsi_file)
-  cat("Original gsiDraws fish:", nrow(gsiDraws_original), "\n")
-
-  # Keep only fish that are in the cleaned trap dataset
-  gsiDraws_filtered <- gsiDraws_original %>%
-    filter(MasterID %in% trap$MasterID)
-
-  # Count removed fish
-  n_removed_from_gsi <- nrow(gsiDraws_original) - nrow(gsiDraws_filtered)
-  cat("Removed from gsiDraws:", n_removed_from_gsi, "\n")
-  cat("Filtered gsiDraws fish:", nrow(gsiDraws_filtered), "\n")
-
-  # Save filtered file
-  write_tsv(gsiDraws_filtered, gsi_file)
-  cat("✓ Saved filtered gsiDraws to:", gsi_file, "\n")
-} else {
-  cat("\nNote: gsiDraws file not found. This is normal if EFGL hasn't returned it yet.\n")
-  cat("Re-run this section after receiving:", gsi_file, "\n")
-}
 
 ## Run getwd(). This is where the .csv saved to.
 getwd()
