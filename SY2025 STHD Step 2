@@ -171,11 +171,12 @@ trap %>%
 
 
 # AUTOMATIC COMPOSITION STRATA ASSIGNMENT ---------------------------------
-# Generate full list of weeks for STHD spawn year (2024_27 through 2025_26)
+# Generate full list of weeks for STHD spawn year (2024_27 through 2025_27)
+# Note: Extended to week 27 to include late-season trap data
 all_weeks <- tibble(
   sWeek = c(
     sprintf("2024_%02d", 27:53),  # July-Dec 2024 (weeks 27-53)
-    sprintf("2025_%02d", 1:26)    # Jan-June 2025 (weeks 1-26)
+    sprintf("2025_%02d", 1:27)    # Jan-July 2025 (weeks 1-27)
   )
 )
 
