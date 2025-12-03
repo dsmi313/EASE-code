@@ -36,9 +36,6 @@ summary(tagRates$tagRate) #should be >0 and at most 1; no NAs
 #load final trap data
 trap <- read.csv('C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_trap.csv')
 
-# Remove fish with uncertain ages (?) before any analysis
-trap <- trap %>% filter(is.na(swAge) | swAge != "?")
-
 # should have 0 rows
 trap %>% count(releaseGroup) %>% left_join(tagRates, by = c("releaseGroup" = "group")) %>%
   mutate(tagRate = as.numeric(tagRate)) %>%
@@ -154,9 +151,6 @@ missing_fish <- tibble(
 
 # Combine with existing gsiDraws
 gsiDraws <- bind_rows(gsiDraws, missing_fish)
-
-# Remove fish with uncertain ages (already filtered from trap)
-gsiDraws <- gsiDraws %>% filter(MasterID %in% trap$MasterID)
 
 # Verify all trap fish are in gsiDraws
 if(nrow(gsiDraws) == nrow(trap) && sum(!trap$MasterID %in% gsiDraws$MasterID) == 0) {
@@ -582,7 +576,7 @@ ggplot(eval_comp, aes(x = factor(stratum))) +
 # SCOBI EXPORT FORMATTING -------------------------------------------------
 # Format data for SCOBI analysis software
 
-# SCOBI trap file (trap already filtered for uncertain ages at start)
+# SCOBI trap file
 trap_scobi <- trap %>%
   mutate(
     CalenderYear = year(ymd(CollectionDate)),

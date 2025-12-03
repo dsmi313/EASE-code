@@ -644,6 +644,31 @@ trap %>% count(!is.na(GenStock), !is.na(Age), !is.na(swAge), !is.na(BY), !is.na(
 #^ the last line of the above output shows that in the trap dataset we have 1368 wild fish that have ALL of the required variables (TRUE): a GenStock, an Age, a swAge, a Brood Year, a Length, and a Sex.
 
 write.csv(trap, paste0("SY", sy, spp, "_trap.csv"), row.names = F)
+
+# Filter gsiDraws file to match cleaned trap data (remove uncertain age fish)
+gsi_file <- "C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/OmyLGRU25S_gsiDraws_final.txt"
+if(file.exists(gsi_file)) {
+  cat("\nFiltering gsiDraws to match cleaned trap data...\n")
+  gsiDraws_original <- read_tsv(gsi_file)
+  cat("Original gsiDraws fish:", nrow(gsiDraws_original), "\n")
+
+  # Keep only fish that are in the cleaned trap dataset
+  gsiDraws_filtered <- gsiDraws_original %>%
+    filter(MasterID %in% trap$MasterID)
+
+  # Count removed fish
+  n_removed_from_gsi <- nrow(gsiDraws_original) - nrow(gsiDraws_filtered)
+  cat("Removed from gsiDraws:", n_removed_from_gsi, "\n")
+  cat("Filtered gsiDraws fish:", nrow(gsiDraws_filtered), "\n")
+
+  # Save filtered file
+  write_tsv(gsiDraws_filtered, gsi_file)
+  cat("✓ Saved filtered gsiDraws to:", gsi_file, "\n")
+} else {
+  cat("\nNote: gsiDraws file not found. This is normal if EFGL hasn't returned it yet.\n")
+  cat("Re-run this section after receiving:", gsi_file, "\n")
+}
+
 ## Run getwd(). This is where the .csv saved to.
 getwd()
 
