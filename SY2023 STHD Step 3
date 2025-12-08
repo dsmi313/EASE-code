@@ -1,0 +1,1375 @@
+# ESTIMATE ESCAPEMENT
+#load package
+#devtools::install_github("delomast/escapeLGD")
+library(escapeLGD)
+library(tidyverse)
+#library(lubridate)
+
+#This vignette will show you how to estimate escapement at 
+#Lower Granite Dam. We will be using steelhead data as an example. 
+#Note that all data objects in this vignette are included in the package, 
+#so you can follow along and explore the data objects in more detail.
+
+#Uncertainty is quantified by bootstrapping. The same number of bootstraps must
+#be run for all steps. To make this easy, we are going to 
+#define a variable with the number of bootstraps. To make this 
+#vignette run quickly, we are going to use a value of 10. In actuality, 
+#you should run many more. We also set the seed for the random number generator
+#to make the bootstrapping exactly reproducible.
+numBoots <- 1000 #use 10 for test runs, and 1000 for the real deal
+set.seed(7)
+alpha_ci <- 0.05 #set the confidence interval (default 95% (0.05), but can do 90% (0.1))
+
+#define spawn year and species for easier file naming:
+sy <- 2024
+spp <- "STHD" # sthd or chnk
+
+#set your working directory and load in final input data .rda file:
+
+load('C:/Users/nicolette.beeken/OneDrive - State of Idaho/Documents/Nampa Anadromous Fisheries Research/LGR EASE (adult) analysis_Beeken/EASE data/SY2024 STHD/Final inputs/SY2024STHD_Final.Inputs.RData') #wouldnt load with .rda but did with .RData
+setwd('C:/Users/nicolette.beeken/OneDrive - State of Idaho/Documents/Nampa Anadromous Fisheries Research/LGR EASE (adult) analysis_Beeken/EASE data/SY2024 STHD/Output/RUN 5')
+#________________________________________________________________________
+### 1) NIGHTTIME PASSAGE AND FALLBACK RATE
+#Here we are estimating nighttime passage rates and fallback rates. 
+#We are assuming that the rate of fallback withOUT reascension is 0.
+
+#__________________
+    #1A) INPUTS
+#The first dataset we need is counts of the number of PIT tags ascending in
+#each week and counts of how many of those PIT tags later fell back - 
+#as determined by detection in the ladder during another ascension 
+#(regardless of what week it was).
+
+fullReComplete #one of inputs from data prep
+#> # A tibble: 108 x 4
+#>    sWeek   stockGroup numReascend totalPass
+#>    <chr>   <chr>            <dbl>     <dbl>
+#>  1 2018_26 lower                0         0
+#>  2 2018_27 lower                0         0
+#>  3 2018_28 lower                1         2
+#>  4 2018_29 lower                0         0
+#>  5 2018_30 lower                0         0
+#>  6 2018_31 lower                0         0
+#>  7 2018_32 lower                0         0
+#>  8 2018_33 lower                0         0
+#>  9 2018_34 lower                0         0
+#> 10 2018_35 lower                0         0
+#> # ... with 98 more rows
+
+#So you can see ^this is a tibble with four columns:
+  #sWeek: the statistical week
+  #stockGroup: the name of the group to which this row of data corresponds to 
+    #and for which fallback and reascension is being estimated
+  #numReascend: the number of PIT ascensions that later reascended (d_f)
+  #totalPass: the total number of PIT ascensions (d_as)
+
+#Some important clarifying points:
+  #totalPass is the total number of PIT ascensions, NOT the total number of 
+    #unique fish ascending. So if 5 fish were detected ascending once this week 
+    #and one other fish was detected ascending 3 times this week, 
+    #then totalPass would be 8 even though there were only 6 unique fish
+  #numReascend is the number of the ascensions in totalPass that 
+    #later reascended, regardless of when they reascended. So, 
+    #continuing the example from above, if the 6 fish were never detected again,
+    #then numReascend would be 2. If one of the fish was 
+    #detected ascending again 6 weeks later, numReascend would be 3.
+
+#The next dataset is counts of PIT tags ascending in 
+#each week and counts of how many were at night:
+fullNiComplete
+#> # A tibble: 54 x 3
+#>    sWeek   nightPass totalPass
+#>    <chr>       <dbl>     <dbl>
+#>  1 2018_26         0         1
+#>  2 2018_27         1         3
+#>  3 2018_28         1        10
+#>  4 2018_29         0        14
+#>  5 2018_30         0         6
+#>  6 2018_31         1        12
+#>  7 2018_32         0        12
+#>  8 2018_33         0        10
+#>  9 2018_34         0         9
+#> 10 2018_35         0        10
+#> # ... with 44 more rows
+
+#^This is a tibble with three columns:
+  #sWeek: the statistical week
+  #nightPass: the number of PIT ascensions that were at night (d_n)
+  #totalPass: the total number of PIT ascensions (d_a)
+#Note that the sum of totalPass in fullNiComplete should = 
+#the sum of totalPass in fullReComplete unless there are 
+#PIT tags ascending with ambiguous stockGroup.
+sum(fullNiComplete$totalPass)
+sum(fullReComplete$totalPass)#Ok
+
+#We need the stratification for fallback:
+  stratFallback
+#> # A tibble: 108 x 3
+#>    stockGroup sWeek   stratum
+#>    <chr>      <chr>     <dbl>
+#>  1 lower      2018_26       1
+#>  2 lower      2018_27       1
+#>  3 lower      2018_28       1
+#>  4 lower      2018_29       1
+#>  5 lower      2018_30       1
+#>  6 lower      2018_31       1
+#>  7 lower      2018_32       1
+#>  8 lower      2018_33       1
+#>  9 lower      2018_34       1
+#> 10 lower      2018_35       1
+#> # ... with 98 more rows
+
+#This is a tibble with three columns:
+  #stockGroup: the name of the group to which this row of 
+    #data corresponds to and for which fallback and reascension is 
+    #being estimated
+  #sWeek: the statistical week
+  #stratum: the stratum that this week belongs to for the given stockGroup
+  
+#All weeks should have a stratum defined for all stockGroups. 
+#The stratum for a particular week can (and likely should) be 
+#different for different stockGroups.
+  
+#We also need the stratification for nighttime passage:
+  stratNight
+  #> # A tibble: 54 x 2
+  #>    sWeek   stratum
+  #>    <chr>     <dbl>
+  #>  1 2018_26       1
+  #>  2 2018_27       1
+  #>  3 2018_28       1
+  #>  4 2018_29       1
+  #>  5 2018_30       1
+  #>  6 2018_31       1
+  #>  7 2018_32       1
+  #>  8 2018_33       1
+  #>  9 2018_34       1
+  #> 10 2018_35       1
+  #> # ... with 44 more rows
+  
+#^This is a tibble with two columns:
+    #sWeek: the statistical week
+    #stratum: the stratum that this week belongs to
+
+#__________________
+#1B) ESTIMATES
+
+#Now we run part of the model to estimate fallback rates and 
+#nighttime passage rates:
+  nf <- nightFall(full_reascend = fullReComplete, full_night = fullNiComplete,
+                  stratAssign_fallback = stratFallback, stratAssign_night = stratNight,
+                  full_spillway = NULL, boots = numBoots)
+  
+#Because we didn't include spillway data, it is telling us that it is 
+  #assuming no fallback without reascension. This may not be true if 
+  #you included detected fallbacks using detectors other than the ladder in 
+  #fullReComplete$numReascend, but the program can't tell so 
+  #it issues the message.
+  #"full_spillway = NULL" assumes no fallback without reascension (aka EVERY fish
+  #that falls back reascends)
+
+#The estimates are now saved to nf and we will use this object as 
+  #an input to future functions. Let's look through nf so you can 
+  #understand what is in it in case you need any of the specific 
+  #information or want to do something fancy.
+  nf$fallback_rates[[1]]
+  #> # A tibble: 11 x 7
+  #> # Groups:   stockGroup [2]
+  #>    stockGroup stratum numReascend totalPass totalFall laterAscend    p_fa
+  #>    <chr>        <dbl>       <dbl>     <dbl>     <dbl>       <dbl>   <dbl>
+  #>  1 lower            1           1        45         0           0 0.0222 
+  #>  2 lower            2           5        15         0           0 0.333  
+  #>  3 upper            1           6       119         0           0 0.0504 
+  #>  4 upper            2           3       100         0           0 0.03   
+  #>  5 upper            3           2       194         0           0 0.0103 
+  #>  6 upper            4           2       183         0           0 0.0109 
+  #>  7 upper            5           1       215         0           0 0.00465
+  #>  8 upper            6           2       309         0           0 0.00647
+  #>  9 upper            7           1       235         0           0 0.00426
+  #> 10 upper            8           2        80         0           0 0.025  
+  #> 11 upper            9          50       130         0           0 0.385
+  head(nf$fallback_rates[[2]]) #CMB 11-1-21: the columns are each stratum, the rows are each bootstrap iteration of numBoots
+  #>            [,1]      [,2]       [,3] [,4]        [,5]        [,6]        [,7]
+  #> [1,] 0.08888889 0.2000000 0.05882353 0.04 0.015463918 0.010928962 0.000000000
+  #> [2,] 0.02222222 0.2666667 0.04201681 0.02 0.005154639 0.016393443 0.004651163
+  #> [3,] 0.00000000 0.4000000 0.10924370 0.01 0.015463918 0.016393443 0.009302326
+  #> [4,] 0.00000000 0.2000000 0.07563025 0.01 0.010309278 0.010928962 0.004651163
+  #> [5,] 0.00000000 0.3333333 0.10084034 0.02 0.020618557 0.016393443 0.004651163
+  #> [6,] 0.04444444 0.2000000 0.02521008 0.05 0.005154639 0.005464481 0.004651163
+  #>             [,8]        [,9]  [,10]     [,11]
+  #> [1,] 0.003236246 0.008510638 0.0125 0.4153846
+  #> [2,] 0.006472492 0.008510638 0.0000 0.3307692
+  #> [3,] 0.009708738 0.000000000 0.0500 0.4230769
+  #> [4,] 0.006472492 0.008510638 0.0125 0.3384615
+  #> [5,] 0.003236246 0.004255319 0.0375 0.3538462
+  #> [6,] 0.006472492 0.000000000 0.0250 0.3538462
+  
+#nf$fallback_rates[[1]] is a tibble containing point estimates(column p_fa) of
+  #the fallback rate for each stockGroup x stratum combination. 
+  #nf$fallback_rates[[2]] is a matrix containing bootstrap estimates. 
+  #The columns correspond to the rows of nf$fallback_rates[[1]].
+  
+  
+#nf$nightPassage_rates[[1]] is a tibble containing point estimates
+  #(column p_night) of the nighttime passage rate for each stratum. 
+  #nf$nightPassage_rates[[2]] is a matrix containing bootstrap estimates. 
+  #The columns correspond to the rows (strata) of nf$nightPassage_rates[[1]] and each row is a bootstrap iteration.
+  nf$nightPassage_rates[[1]]
+  #> # A tibble: 11 x 4
+  #>    stratum nightPass totalPass p_night
+  #>      <dbl>     <dbl>     <dbl>   <dbl>
+  #>  1       1         3       122  0.0246
+  #>  2       2         2       103  0.0194
+  #>  3       3         8       196  0.0408
+  #>  4       4         6       190  0.0316
+  #>  5       5        10       225  0.0444
+  #>  6       6         3       153  0.0196
+  #>  7       7         2       162  0.0123
+  #>  8       8        10       124  0.0806
+  #>  9       9        20       121  0.165 
+  #> 10      10        15        84  0.179 
+  #> 11      11        15       145  0.103
+  head(nf$nightPassage_rates[[2]])
+  #>            [,1]        [,2]       [,3]       [,4]       [,5]        [,6]
+  #> [1,] 0.03278689 0.009708738 0.03061224 0.03157895 0.04000000 0.013071895
+  #> [2,] 0.02459016 0.019417476 0.03061224 0.03684211 0.05333333 0.039215686
+  #> [3,] 0.04098361 0.009708738 0.03061224 0.03157895 0.04000000 0.026143791
+  #> [4,] 0.03278689 0.029126214 0.05102041 0.03157895 0.05333333 0.026143791
+  #> [5,] 0.04098361 0.009708738 0.04081633 0.02631579 0.02222222 0.019607843
+  #> [6,] 0.03278689 0.038834951 0.05102041 0.04210526 0.04444444 0.006535948
+  #>            [,7]       [,8]      [,9]     [,10]      [,11]
+  #> [1,] 0.02469136 0.09677419 0.1983471 0.2023810 0.07586207
+  #> [2,] 0.01851852 0.07258065 0.1652893 0.2023810 0.09655172
+  #> [3,] 0.00000000 0.08064516 0.1983471 0.2023810 0.13103448
+  #> [4,] 0.01234568 0.10483871 0.1487603 0.1428571 0.09655172
+  #> [5,] 0.00617284 0.05645161 0.1900826 0.2023810 0.13103448
+  #> [6,] 0.02469136 0.03225806 0.1818182 0.1547619 0.06206897
+  
+
+#________________________________________________________________________
+### 2) TOTAL NUMBER OF ASCENSIONS
+  
+  #We need to do two things to estimate the total number of ascensions:
+    #1.Adjust for the proportion of time counting is performed during the day
+    #2.Add in nighttime passage using the rates estimated in the last step
+  
+#__________________
+#2A) INPUTS
+#We need the raw window count estimates by week. 
+#These should NOT be expanded for the counting time. 
+#There should be a value for every statistical week, even if it is 0.
+  wc
+  #> # A tibble: 54 x 2
+  #>    sWeek      wc
+  #>    <chr>   <dbl>
+  #>  1 2018_26    12
+  #>  2 2018_27   129
+  #>  3 2018_28   178
+  #>  4 2018_29   248
+  #>  5 2018_30   221
+  #>  6 2018_31   192
+  #>  7 2018_32   180
+  #>  8 2018_33   101
+  #>  9 2018_34   118
+  #> 10 2018_35   216
+  #> # ... with 44 more rows
+  
+  #^This is a tibble with two columns:
+    #sWeek: the statistical week
+    #wc: the number of fish counted that week (unexpanded counts)
+
+#We also need to know the proportion of time that counting was 
+  #performed during the day (rr. Historically, this has been 5/6).
+  #And we need the stratification for the composition estimates:
+  stratComp
+  #> # A tibble: 54 x 2
+  #>    sWeek   stratum
+  #>    <chr>     <dbl>
+  #>  1 2018_26       1
+  #>  2 2018_27       1
+  #>  3 2018_28       1
+  #>  4 2018_29       1
+  #>  5 2018_30       1
+  #>  6 2018_31       1
+  #>  7 2018_32       1
+  #>  8 2018_33       1
+  #>  9 2018_34       1
+  #> 10 2018_35       1
+  #> # ... with 44 more rows
+  
+  #^This is a tibble with two columns:
+    #sWeek: the statistical week
+    #stratum: the stratum that this week belongs to
+
+#There is a built in function to check that our composition strata are 
+  #compatible with our fallback strata. Let's make sure before we move on. #only one fallback stratum for each composition stratum
+  checkStrata(stratAssign_comp = stratComp, stratAssign_fallback = stratFallback)
+  #> Strata are compatible, ok
+  
+#__________________
+#2B) ESTIMATES
+  
+#Now we run the part of the model that estimates the total number of 
+  #ascensions. This involves expanding the window count for the proportion of 
+  #time sampling and applying the nighttime passage rates previously estimated. #CMB 11-1-21: RE expanding wc after unexpanding them in data prep
+  exp_wc <- expand_wc_binom_night(nightPassage_rates = nf$nightPassage_rates, wc = wc,
+                                  wc_prop = 5/6, stratAssign_comp = stratComp, #CMB: do for old SCOBI method: change 5/6 to 1. Use 5/6 for EASE
+                                  stratAssign_night = stratNight, alpha_ci = alpha_ci, boots = numBoots) #CMB: estimate nighttime passage from PIT data and daytime passage from window counts, uses wc_prop to get estimates and bootstraps that feed into the confidence interval.
+
+#The estimates are now saved to exp_wc and we will use this object as 
+  #an input to future functions. Let's look through exp_wc so you can 
+  #understand what is in it in case you need any of the specific 
+  #information or want to do something fancy.
+  exp_wc[[1]]
+  #> # A tibble: 11 x 2
+  #>    stratum    wc
+  #>      <dbl> <dbl>
+  #>  1       1 2836.
+  #>  2       2 3710.
+  #>  3       3 7214.
+  #>  4       4 7948.
+  #>  5       5 8941.
+  #>  6       6 6022.
+  #>  7       7 5114.
+  #>  8       8 3386.
+  #>  9       9 2754.
+  #> 10      10 3636.
+  #> 11      11 3231.
+  
+  #^The first item is a tibble containing the point estimates for 
+  #the total number of ascensions in each composition stratum.
+  
+head(exp_wc[[2]])
+  #>          [,1]     [,2]     [,3]     [,4]     [,5]     [,6]     [,7]     [,8]
+  #> [1,] 2844.875 3600.153 7185.979 7987.435 8901.250 5976.119 5187.281 3419.743
+  #> [2,] 2812.356 3690.867 7190.931 7958.820 9054.507 6189.943 5182.777 3334.414
+  #> [3,] 2871.692 3653.471 7107.992 7966.370 8876.250 6051.407 5068.800 3414.568
+  #> [4,] 2883.336 3756.204 7292.465 7946.543 9057.042 6057.568 5183.190 3496.130
+  #> [5,] 2894.215 3689.824 7264.928 7886.335 8744.318 6068.592 5077.342 3344.821
+  #> [6,] 2880.854 3806.630 7306.374 7932.396 8907.488 6004.445 5193.433 3210.360
+  #>          [,9]    [,10]    [,11]
+  #> [1,] 2899.509 3758.185 3151.478
+  #> [2,] 2750.174 3725.087 3238.260
+  #> [3,] 2890.528 3682.961 3333.619
+  #> [4,] 2702.412 3465.000 3213.023
+  #> [5,] 2828.437 3800.310 3368.143
+  #> [6,] 2805.733 3550.715 3119.206
+  
+  #^The second item is a matrix with bootstrap estimates. 
+  #The columns of this matrix correspond to the rows of exp_wc[[1]] so cols are strata and each row is a bootstrap iteration.
+  
+exp_wc[[3]] #CMB: nighttime passage of the ENTIRE run. 
+  #> # A tibble: 1 x 3
+  #>   overallNightPass    lci    uci
+  #>              <dbl>  <dbl>  <dbl>
+  #> 1           0.0543 0.0529 0.0650
+  
+  #^The third item is a tibble with the overall point estimate of 
+  #nighttime passage (for the entire run) and the CI. The default
+  #for the CI is 0.1, but this can be changed by passing the argument 
+  #alpha_ci to the function expand_wc_binom_night.
+
+#and save the overall nighttime passage as an object for easy recalling:
+overallNightPass <- exp_wc[[3]]
+
+#________________________________________________________________________
+### 3) COMPOSITION OF ASCENSIONS
+#__________________
+#3A) INPUTS
+#To estimate the composition of ascensions, we need to select the 
+#variables we want to estimate composition for in H, HNC, and W.
+
+###CMB: To get all the diff categories, have to run this model more than once. Ex: (Genstock, GenSex), then second run with (GenStock, Age), etc
+#CMB: dont have to have two categories
+
+#run the "RUN" code with each w, h, and hnc grouping for easy file naming at the end!
+
+#######RUN #1: W = Stock, Size; H = Size; HNC = Size; takes 55 min
+RUN <- "RUN 1_W-Genstock-Size_H and HNC-Size" #for file naming
+w <- c("GenStock", "lenCat") #CMB: saying estimate Genstock, and then lencat within Genstock
+h <- c("releaseGroup", "lenCat") #column names of the trap data that correspond to the categories I want.
+hnc <- c("releaseGroup", "lenCat") #run releaseGroup as var1 bc EASE needs this info for the Ambiguous PBT groups step.
+
+#######RUN #2: W = Stock, Age; H = ByHat_Rgroup; HNC = ByHat_Rgroup; takes 1 hr 45 min to run
+RUN <- "Run 2_W-Genstock-Age_H-releaseGroup_HNC-releaseGroup"
+w <- c("GenStock", "Age")
+h <- c("releaseGroup")
+hnc <- c("releaseGroup")
+
+
+#######RUN #3: W = Stock, Saltwater Age; takes 25  min to run
+RUN <- "Run 3_W-Genstock-swAge_H-releaseGroup_HNC-releaseGroup"
+w <- c("GenStock", "swAge") 
+h <- c("releaseGroup")
+hnc <- c("releaseGroup")
+
+
+#######RUN #4: W = Stock, Brood Year; takes ~20min
+RUN <- "Run 4_W-Genstock-BroodYear_H-releaseGroup_HNC-releaseGroup"
+w <- c("GenStock", "BY") 
+h <- c("releaseGroup")
+hnc <- c("releaseGroup")
+
+
+#######RUN #5: W = Stock, Sex; takes 40min to run
+RUN <- "Run 5_W-Genstock-Sex_H-releaseGroup_HNC-releaseGroup"
+w <- c("GenStock", "GenSex")
+h <- c("releaseGroup")
+hnc <- c("releaseGroup")
+
+#######RUN #6: W = MPG
+#w <- c("MPG")
+#h <- c("releaseGroup")
+#hnc <- c("releaseGroup")
+
+
+#Since we want to incorporate GSI uncertainty, we need a dataset with 
+#draws from the posterior for all samples:
+gsi_draws_NA_probfish #CMB: total rows should equal total fish for the current spawn year
+#> # A tibble: 10,886 x 2,001
+#>    MasterID boot_1 boot_2 boot_3 boot_4 boot_5 boot_6 boot_7 boot_8 boot_9
+#>       <dbl> <chr>  <chr>  <chr>  <chr>  <chr>  <chr>  <chr>  <chr>  <chr> 
+#>  1   399859 <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>  
+#>  2   399862 UPCLWR LSNAKE UPSALM UPSALM UPCLWR UPCLWR SFCLWR UPSALM UPSALM
+#>  3   399895 <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>  
+#>  4   399913 <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>  
+#>  5   399917 MFSALM MFSALM MFSALM MFSALM MFSALM MFSALM MFSALM MFSALM MFSALM
+#>  6   399931 <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>  
+#>  7   399932 <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>   <NA>  
+#>  8   399940 MFSALM MFSALM MFSALM MFSALM MFSALM MFSALM MFSALM MFSALM MFSALM
+#>  9   399945 UPSALM UPSALM UPSALM UPSALM UPSALM UPSALM UPSALM LSNAKE UPSALM
+#> 10   399957 UPSALM UPSALM LSNAKE UPSALM LSNAKE UPSALM LSNAKE GRROND LSNAKE
+#> # ... with 10,876 more rows, and 1,991 more variables: boot_10 <chr>,
+#> #   boot_11 <chr>, boot_12 <chr>, boot_13 <chr>, boot_14 <chr>, boot_15 <chr>,
+#> #   boot_16 <chr>, boot_17 <chr>, boot_18 <chr>, boot_19 <chr>, boot_20 <chr>,
+#> #   boot_21 <chr>, boot_22 <chr>, boot_23 <chr>, boot_24 <chr>, boot_25 <chr>,
+#> #   boot_26 <chr>, boot_27 <chr>, boot_28 <chr>, boot_29 <chr>, boot_30 <chr>,
+#> #   boot_31 <chr>, boot_32 <chr>, boot_33 <chr>, boot_34 <chr>, boot_35 <chr>,
+#> #   boot_36 <chr>, boot_37 <chr>, boot_38 <chr>, boot_39 <chr>, boot_40 <chr>,
+#> #   boot_41 <chr>, boot_42 <chr>, boot_43 <chr>, boot_44 <chr>, boot_45 <chr>,
+#> #   boot_46 <chr>, boot_47 <chr>, boot_48 <chr>, boot_49 <chr>, boot_50 <chr>,
+#> #   boot_51 <chr>, boot_52 <chr>, boot_53 <chr>, boot_54 <chr>, boot_55 <chr>,
+#> #   boot_56 <chr>, boot_57 <chr>, boot_58 <chr>, boot_59 <chr>, boot_60 <chr>,
+#> #   boot_61 <chr>, boot_62 <chr>, boot_63 <chr>, boot_64 <chr>, boot_65 <chr>,
+#> #   boot_66 <chr>, boot_67 <chr>, boot_68 <chr>, boot_69 <chr>, boot_70 <chr>,
+#> #   boot_71 <chr>, boot_72 <chr>, boot_73 <chr>, boot_74 <chr>, boot_75 <chr>,
+#> #   boot_76 <chr>, boot_77 <chr>, boot_78 <chr>, boot_79 <chr>, boot_80 <chr>,
+#> #   boot_81 <chr>, boot_82 <chr>, boot_83 <chr>, boot_84 <chr>, boot_85 <chr>,
+#> #   boot_86 <chr>, boot_87 <chr>, boot_88 <chr>, boot_89 <chr>, boot_90 <chr>,
+#> #   boot_91 <chr>, boot_92 <chr>, boot_93 <chr>, boot_94 <chr>, boot_95 <chr>,
+#> #   boot_96 <chr>, boot_97 <chr>, boot_98 <chr>, boot_99 <chr>, boot_100 <chr>,
+#> #   boot_101 <chr>, boot_102 <chr>, boot_103 <chr>, boot_104 <chr>,
+#> #   boot_105 <chr>, boot_106 <chr>, boot_107 <chr>, boot_108 <chr>,
+#> #   boot_109 <chr>, ...
+
+#^The first column must be a sample identifier, and all 
+#other columns have GSI assignments. Each column represents one 
+#draw from the posterior. Fish that were not assessed for GSI are 
+#given values of "NA".
+
+#We also need the trap data:
+trap
+#> # A tibble: 10,886 x 68
+#>    MasterID CollectionDate SpawnYear LGDTrapID     TrapOrigSampleC~ BioSamplesID
+#>       <dbl> <date>         <chr>     <chr>         <chr>            <chr>       
+#>  1   400124 2018-07-06     SY2019    LGR3A-LGR-32~ F2018SWRFAI00019 18-20569    
+#>  2   400110 2018-07-06     SY2019    LGR1A-LGR-32~ <NA>             <NA>        
+#>  3   400095 2018-07-06     SY2019    LGR3A-LGR-32~ F2018SWRFAI00018 18-20568    
+#>  4   400091 2018-07-06     SY2019    LGR1A-LGR-32~ <NA>             <NA>        
+#>  5   400082 2018-07-05     SY2019    LGR3A-LGR-32~ F2018SWRFAI00016 18-20566    
+#>  6   400069 2018-07-05     SY2019    LGR3A-LGR-32~ F2018SWRFAI00014 18-20564    
+#>  7   400068 2018-07-05     SY2019    LGR3A-LGR-32~ F2018SWRFAI00010 18-20560    
+#>  8   400067 2018-07-05     SY2019    LGR1A-LGR-32~ <NA>             <NA>        
+#>  9   400064 2018-07-05     SY2019    LGR3A-LGR-32~ F2018SWRFAI00012 18-20562    
+#> 10   400062 2018-07-05     SY2019    LGR3A-LGR-32~ F2018SWRFAI00013 18-20563    
+#> # ... with 10,876 more rows, and 62 more variables: CollectionLocation <chr>,
+#> #   LGDFLmm <dbl>, SRR <chr>, LGDSpecies <dbl>, PtagisSpecies <dbl>,
+#> #   GenSpecies <chr>, LGDRun <dbl>, PtagisRun <dbl>, GenRun <chr>,
+#> #   LGDRear <chr>, PtagisRear <chr>, GenRear <chr>, LGDLifeStage <chr>,
+#> #   LGDSex <chr>, GenSex <chr>, GenStock <chr>, GenStockProb <dbl>,
+#> #   GenMa <chr>, GenPa <chr>, GenParentHatchery <lgl>, GenBY <lgl>,
+#> #   GenComments <chr>, LGDFishComments <chr>, BioScaleFinalAge <chr>,
+#> #   BiosamplesValid <dbl>, LGDValid <dbl>, LGDMarksAll <chr>, LGDMarkAD <chr>,
+#> #   LGDTagsAll <chr>, LGDNumPIT <chr>, LGDNumJaw <lgl>, LGDInjuryiesAll <chr>,
+#> #   OpTrapSampleRate <dbl>, LGDOpComments <chr>, OpWaterTemp <dbl>,
+#> #   PtagisRelSites <chr>, PtagisFlags <chr>, PTAgisSxCGRAObs <lgl>,
+#> #   LGDMarkNFComment <lgl>, WeekNumber <dbl>, CountofMasterID <dbl>,
+#> #   CreatedDate <dbl>, LGDSubsample <chr>, PtagisEventSites <chr>,
+#> #   PtagisLastEventDate <dbl>, PtagisLastEventSite <chr>,
+#> #   PtagisEventLastSpawnSite <chr>, GenPBT_ByHat <chr>, GenPBT_RGroup <chr>,
+#> #   LGDWeight <lgl>, LGDNumRT <chr>, LGDSampleID <chr>, LGDMarkADComment <chr>,
+#> #   LGDMarkUMComment <chr>, CalendarPeriod <chr>, y <dbl>, w <dbl>,
+#> #   sWeek <chr>, physTag <lgl>, pbtAssign <lgl>, releaseGroup <chr>,
+#> #   lenCat <chr>
+
+#^There's a lot here because this was pulled from the 
+#LGR database. Here are the only columns we need for the analysis:
+trap[,c("MasterID", "releaseGroup", "sWeek", "physTag", "LGDMarkAD", "GenStock", "lenCat", "Age", "swAge", "BY", "GenSex")] #may be interested in different columns!
+#> # A tibble: 10,886 x 7
+#>    MasterID releaseGroup sWeek   physTag LGDMarkAD GenStock lenCat
+#>       <dbl> <chr>        <chr>   <lgl>   <chr>     <chr>    <chr> 
+#>  1   400124 Unassigned   2018_27 FALSE   AI        GRROND   Sm    
+#>  2   400110 <NA>         2018_27 FALSE   AD        <NA>     Sm    
+#>  3   400095 Unassigned   2018_27 FALSE   AI        UPSALM   Sm    
+#>  4   400091 <NA>         2018_27 TRUE    AD        <NA>     Sm    
+#>  5   400082 Unassigned   2018_27 FALSE   AI        LSNAKE   Lg    
+#>  6   400069 Unassigned   2018_27 FALSE   AI        LSNAKE   Sm    
+#>  7   400068 Unassigned   2018_27 FALSE   AI        GRROND   Sm    
+#>  8   400067 <NA>         2018_27 FALSE   AD        <NA>     Sm    
+#>  9   400064 Unassigned   2018_27 FALSE   AI        GRROND   Sm    
+#> 10   400062 Unassigned   2018_27 FALSE   AI        IMNAHA   Sm    
+#> # ... with 10,876 more rows
+
+#We need:
+  #A variable with sample IDs that correspond to the sample IDs in 
+    #gsiDraws (MasterID)
+  #A variable giving PBT assignments ("Unassigned" for fish that 
+    #were attempted to be assigned but did not and "NA" for fish that were 
+    #not genotyped) (releaseGroup)
+  #A variable giving the statistical week (sWeek)
+  #A variable denoting if a sample was recorded as having a 
+    #physical tag denoting it of hatchery origin ("TRUE") or not ("FALSE"). 
+    #If no samples were assessed for physical tags, they should all 
+    #be given a value of "FALSE". (physTag)
+  #A variable denoting if a sample for ad-clipped ("AD") or 
+    #ad-intact ("AI"). No other values (including "NA") are allowed.(LGDMarkAD)
+  #Any other variables that you are estimating composition for 
+    #(GenStock, lenCat)
+
+#We also need PBT tag rates:
+# filtering out any erroneous tag rates
+tagRates <- tagRates[!is.na(tagRates$tagRate) & tagRates$tagRate > 0,] #done in data prep so delete this
+tagRates
+#> # A tibble: 243 x 2
+#>    group                                                    tagRate
+#>    <chr>                                                      <dbl>
+#>  1 2012-CLWH-DWOR-SFClearwaterR-AdClip                        0.991
+#>  2 2012-CLWH-DWOR-SFClearwaterR-NoClip                        0.961
+#>  3 2012-CLWH-SFCR-SFClearwaterR-AdClip                        0.986
+#>  4 2012-CLWH-SFCR-SFClearwaterR-NoClip                        1    
+#>  5 2012-DWOR-DWOR-LoloCr                                      1    
+#>  6 2012-DWOR-DWOR-NFClearwaterR                               0.548
+#>  7 2012-DWOR-DWOR-NFClearwaterR-AdClip/ClearCr-AdClip         0.945
+#>  8 2012-DWOR-DWOR-NFClearwaterR-AdClip/SFClearwaterR-AdClip   0.945
+#>  9 2012-HNFH-EFNA-EastForkSalmonR-NoClip                      0.941
+#> 10 2012-HNFH-SAWT-McNabbUpperSalmonR-AdClip                   1    
+#> # ... with 233 more rows
+
+#^This is a tibble with two columns. The first gives in names of 
+#the PBT groups matching the names in the "releaseGroup" column of 
+#the trap data. The second gives the tag rates. These should be > 0 and <= 1.
+
+#__________________
+#3B) ESTIMATES
+#There are several ways to estimate composition. This first example shows 
+#how to use the MLE method and incorporate uncertainty in the GSI assignments.
+
+# lets randomize the order of the GSI draws - this may have 
+#  already been done at EFGL, but doing it again won't hurt:
+gsi_draws_NA_probfish <- gsi_draws_NA_probfish[,c(1, sample(2:ncol(gsi_draws_NA_probfish), size = ncol(gsi_draws_NA_probfish) - 1, replace = FALSE))]#randomize columns. only run this once, do it during RUN 1!
+
+# now run the estimating function - this will take a while
+# with large numbers of bootstraps
+#load in updated trap data where 1 STHD age class was corrected
+#trap<-read.csv('~/Nampa Anadromous Fisheries Research/LGR EASE (adult fish) analysis_Beeken/SY2023 STHD_data & notes/Final input files/SY2023STHD_trap_age class corrected.csv')
+est_comp <- HNC_expand_unkGSI(trap = trap, stratAssign_comp = stratComp, 
+                              boots = numBoots,
+                              pbt_var = "releaseGroup", timestep_var = "sWeek", 
+                              physTag_var = "physTag", adclip_var = "LGDMarkAD", 
+                              sampID = "MasterID", tagRates = tagRates,
+                              H_vars = h, HNC_vars = hnc, W_vars = w, 
+                              wc_binom = exp_wc, GSI_draws = gsi_draws_NA_probfish, 
+                              n_point = ceiling(.1 * numBoots), GSI_var = "GenStock",
+                              method = "MLE") #change to GSI_draws = gsiDraws if want to go back to fish w/o ages, although that will likely cause the complete cases error. 
+
+
+#^Note that the n_point argument gives the number of 
+#iterations (GSI draws) to use in calculating the point estimate. 
+#When actually applying this, I recommend about 100 iterations.
+
+#CMB 10-14-21: The paragraph below describes how to change methods when estimating composition.
+#(see pg 6 of LGD_escapement model description.pdf):
+#There are other ways of estimating composition. 
+#To use the accounting method, change to method = "Acc". 
+#To treat GSI assignments as fixed, change the function to HNC_expand and 
+#you can pass either method (MLE or Acc) to that function as well. 
+#You also don't need to specify sampID, n_point, GSI_draws, GSI_var. 
+#To use the reimplementaion of the old SCOBI method, use the function 
+#ascension_composition instead of HNC_expand_unkGSI(). Small differences in arguments, but main arguments are the same.
+#CMB: this only would be scobi for this step, I need to get rid of night passage and fallback to make it actual SCOBI.
+#CMB: Feed fake data files that showed 0 nighttime passage and 0 fallback, and for exp_wc, wc_prop = 1, not 5/6
+
+
+#You may get a few warnings about non-convergence of the MLE estimator. #CMB: "Warning message: In PBT_var2_calc_MLE(v2Data = v2Data, piGroup = piGroup, tagRates = tempTagRates) : Convergence error in PBT_var2_calc_MLE"
+#This typically happens during a few of the bootstrap iterations and is 
+#likely caused by either computational constraints preventing parameters 
+#from being pushed all the way to 0 or the hierarchical, stepwise structure 
+#of the estimation routine. This structure is important so that 
+#estimates of some variables don't change depending on the other 
+#variables being estimated. As long as the number of warnings is less than 
+#about 1% of (the number of bootstrap iterations * the number of composition strata), 
+#I wouldn't worry about it. If there are a very large number of 
+#errors then I would first check the data inputs to make sure there 
+#aren't any mistakes. Then, you can run the accounting estimator and 
+#compare results between the accounting method and the MLE method.
+
+#The estimates are now saved to est_comp and we will use this 
+#object as an input to future functions. Let's look through est_comp so 
+#you can understand what is in it in case you need any of 
+#the specific information or want to do something fancy.
+
+#CMB 11-1-21: SAVE the EST_COMP object so your computer doesn't have to take a long time to run it again:
+write.csv(est_comp[[1]],"SY2024STHD.estcomp1.b4split.RUN5.csv",row.names = F) #ran once I shorted the final folder name in the working directory
+write.csv(est_comp[[2]],"SY2024STHD.estcomp2.boots.b4split.RUN5.csv",row.names = F)
+
+est_comp[[1]]
+# rear  stratum var1                                   var2  total
+#<chr>   <int> <chr>                                  <chr> <dbl>
+#1 H           1 2019-HNFH-EFNAT-EastForkSalmonR-NoClip Sm     13.6
+#2 H           1 2019-HNFH-EFNAT-EastForkSalmonR-NoClip NA     13.6
+#3 H           1 2019-HNFH-SAWT-SawtoothFH-AdClip       Sm     61.9
+#4 H           1 2019-HNFH-SAWT-SawtoothFH-AdClip       NA     61.9
+#5 H           1 2019-IRRI-IMNA-Imnaha                  Sm     98.7
+#6 H           1 2019-IRRI-IMNA-Imnaha                  NA     98.7
+#7 H           1 2019-IRRI-WALL-WallowaR                Sm    370. 
+#8 H           1 2019-IRRI-WALL-WallowaR                NA    370. 
+#9 H           1 2019-LYON-TUCA-TucannonR-WA            Sm     28.1
+#10 H           1 2019-LYON-TUCA-TucannonR-WA            NA     28.1
+# ℹ 1,640 more rows
+
+#^This has point estimates for the number of ascensions in 
+#each stratum and category (rear, var1, var2). 
+#The rows with "NA" for var2 represent the total estimated for 
+#the var1 category (encompassing all var2 values).
+
+est_comp[[2]]
+# rear  var1                                   var2  total stratum  boot
+#<chr> <chr>                                  <chr> <dbl>   <int> <int>
+#1 H     2019-HNFH-EFNAT-EastForkSalmonR-NoClip Sm      0         1     1
+#2 H     2019-HNFH-EFNAT-EastForkSalmonR-NoClip NA      0         1     1
+#3 H     2019-HNFH-SAWT-SawtoothFH-AdClip       Sm     75.4       1     1
+#4 H     2019-HNFH-SAWT-SawtoothFH-AdClip       NA     75.4       1     1
+#5 H     2019-IRRI-IMNA-Imnaha                  Sm     43.9       1     1
+#6 H     2019-IRRI-IMNA-Imnaha                  NA     43.9       1     1
+#7 H     2019-IRRI-WALL-WallowaR                Sm    305.        1     1
+#8 H     2019-IRRI-WALL-WallowaR                NA    305.        1     1
+#9 H     2019-LYON-TUCA-TucannonR-WA            Sm     43.9       1     1
+#10H     2019-LYON-TUCA-TucannonR-WA            NA     43.9       1     1
+
+#^This has bootstrap estimates for the number of ascensions in 
+#each bootstrap iteration, stratum and category (rear, var1, var2).
+
+#________________________________________________________________________
+### 4) AMBIGUOUS PBT GROUPS
+#Some steelhead PBT groups released by OR and/or WA are 
+#ambiguous with respect to which fallback rate should be applied. 
+#We can use PIT tag data to split these into upper and lower stocks.
+#__________________
+#4A) INPUTS
+
+sthd_splitPITdata
+#> # A tibble: 28 x 5
+#>    releaseGroupPBT               stockGroup releaseGroupPIT detectPIT tagRatePIT
+#>    <chr>                         <chr>      <chr>               <dbl>      <dbl>
+#>  1 2015-LYON-CGRW-CottonWoodGR/~ upper      cottonwood             26     0.0498
+#>  2 2015-LYON-CGRW-CottonWoodGR/~ lower      dayton                  3     0.034 
+#>  3 2015-LYON-CGRW-CottonWoodGR/~ lower      wallawalla              2     0.0712
+#>  4 2015-LYON-CGRW-CottonWoodGR/~ lower      lyonsFerry              1     0.0718
+#>  5 2015-LYON-CGRW-CottonWoodGR/~ upper      ProdRTR                 5     1     
+#>  6 2015-LYON-CGRW-CottonWoodGR/~ upper      ProdRAL                 7     0.0147
+#>  7 2015-LYON-CGRW-CottonWoodGR/~ upper      FallRTR                 2     1     
+#>  8 2015-LYON-CGRW-CottonWoodGR/~ upper      FallRAL                 3     0.0081
+#>  9 2015-LYON-CGRW-CottonWoodGR/~ upper      LFRAL                   3     0.0991
+#> 10 2015-LYON-CGRW-CottonWoodGR/~ upper      BigRTR                  2     1     
+#> # ... with 18 more rows
+
+#^This is a tibble where each row represents a PIT tag release group 
+#(a group of fish with one PIT tag rate) with five columns:
+  #releaseGroupPBT: this is the name of the PBT group the fish belong to. 
+    #This should match the name in est_comp.
+  #stockGroup: the stock group that this PIT tag release group represents. 
+    #This should match the name in nf[[1]].
+  #releaseGroupPIT: this is for your use keeping track of the 
+    #PIT tag release groups, it is ignored by the function.
+  #detectPIT: this is the number of PIT tags detected at 
+    #Lower Granite Dam for this group (e.g., d_A d_A)
+  #tagRatePIT: this is the tag rate of that PIT tag group (e.g., t_A t_A)
+
+#__________________
+#4B) ESTIMATES
+
+#Now we split the groups as necessary:
+
+split_est_comp <- splitByPIT(est_comp, sthd_splitPITdata)
+
+#The output has the same structure as est_comp. 
+#Let's look specifically at one of the groups that was split:
+#First the original:
+est_comp[[1]][est_comp[[1]]$var1 == sthd_splitPITdata$releaseGroupPBT[1],]
+#   rear  stratum var1                                              var2    total
+#<chr>   <int> <chr>                                             <chr>   <dbl>
+#1 H           1 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA Sm    3.68e+2
+#2 H           1 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA NA    3.68e+2
+#3 H           2 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA Lg    5.82e-9
+#4 H           2 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA Sm    2.80e+2
+#5 H           2 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA NA    2.80e+2
+#6 H           3 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA Sm    8.74e+1
+#7 H           3 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA NA    8.74e+1
+#8 H           4 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA Lg    4.36e-9
+#9 H           4 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA Sm    5.62e+2
+#10H           4 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA NA    5.62e+2
+
+
+#And after splitting:
+split_est_comp[[1]][grepl(sthd_splitPITdata$releaseGroupPBT[1], split_est_comp[[1]]$var1),]
+# rear  stratum var1                                                    var2    total
+#<chr>   <int> <chr>                                                   <chr>   <dbl>
+#1 H           1 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA_lower Sm    7.56e+1
+#2 H           1 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA_upper Sm    2.93e+2
+#3 H           1 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA_lower NA    7.56e+1
+#4 H           1 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA_upper NA    2.93e+2
+#5 H           2 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA_lower Lg    1.19e-9
+#6 H           2 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA_upper Lg    4.63e-9
+#7 H           2 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA_lower Sm    5.75e+1
+#8 H           2 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA_upper Sm    2.23e+2
+#9 H           2 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA_lower NA    5.75e+1
+#10 H           2 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA_upper NA    2.23e+2
+
+unique(split_est_comp[[1]][grepl(sthd_splitPITdata$releaseGroupPBT[1], split_est_comp[[1]]$var1),]$var1)
+# 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA_lower
+# 2019-LYON-WALL-CottonWoodGR/LyonsFerry/Touchet-WA_upper
+
+#All the entries have now been split, 
+#and the new names are "old_name" + "_" + stockGroup. 
+#In this case, the stockGroups are "upper" and "lower". 
+#The bootstrap estimates have also been split.
+
+#There's no reason to save the old est_comp unless you want to do 
+#something particular with it. Here we just saved it to allow us to 
+#examine the change. So to reduce memory use, we will overwrite it:
+est_comp <- split_est_comp
+rm(split_est_comp)
+
+
+#________________________________________________________________________
+### 5) APPLYING FALLBACK RATES TO ESTIMATES
+#To estimate escapement, we need to apply the estimated fallback rates to 
+#the estimated numbers of ascensions in each category.
+#__________________
+#5A) INPUTS
+#We need to tell the function which categories that were 
+#estimated correspond to which fallback rate. A convenient thing is 
+#to first get the function to tell you all the categories it has. 
+#We do this by passing NULL to the H_groups, HNC_groups, and 
+#W_groups arguments. Note that the split_*_fallback arguments tell the 
+#function which variable ("var1", "var2", or "both") should be used to 
+#assign fallback rates within each rear type.
+templates <- apply_fallback_rates(breakdown = est_comp, fallback_rates = nf$fallback_rates,
+                                  split_H_fallback = "var1",
+                                  split_HNC_fallback = "var1",
+                                  split_W_fallback = "var1",
+                                  H_groups = NULL, HNC_groups = NULL, W_groups = NULL,
+                                  stratAssign_fallback = stratFallback, stratAssign_comp = stratComp, 
+                                  alpha_ci = alpha_ci, output_type = "summary")
+#> Returning a list of templates for assigning fallback rate groups. all H, HNC, and W templates have NA for stockGroup because we haven't defined each one yet
+templates
+#> $H
+#> # A tibble: 44 x 2
+#>    var1                                                stockGroup
+#>    <chr>                                               <lgl>     
+#>  1 2015-DWOR-DWOR-NFClearwaterR-AdClip                 NA        
+#>  2 2015-HNFH-SAWT-SawtoothFH-AdClip                    NA        
+#>  3 2015-IRRI-IMNA-Imnaha                               NA        
+#>  4 2015-IRRI-WALL-GrandeRondeR/WallowaR                NA        
+#>  5 2015-LYON-TUCA-TucannonR-WA                         NA        
+#>  6 2015-MVFH-PAHS-UpperSalmonR-BelowPahsimeoriR-AdClip NA        
+#>  7 2015-NIAG-OXBO-SnakeR-HellsCanyon-AdClip            NA        
+#>  8 2015-NIAG-PAHS-PahsimeroiR-AdClip                   NA        
+#>  9 2016-HNFH-SAWT-SawtoothFH-AdClip                    NA        
+#> 10 2016-IRRI-IMNA-Imnaha                               NA        
+#> # ... with 34 more rows
+#> 
+#> $HNC
+#> # A tibble: 38 x 2
+#>    var1                                  stockGroup
+#>    <chr>                                 <lgl>     
+#>  1 2015-CLWH-SFCR-MeadowCr-NoClip        NA        
+#>  2 2015-HNFH-EFNA-EastForkSalmonR-NoClip NA        
+#>  3 2015-IRRI-IMNA-Imnaha                 NA        
+#>  4 2015-LYON-TUCA-TucannonR-WA           NA        
+#>  5 2016-HNFH-EFNA-EastForkSalmonR-NoClip NA        
+#>  6 2016-IRRI-IMNA-Imnaha                 NA        
+#>  7 Unassigned                            NA        
+#>  8 2015-CLWH-SFCR-NewsomeCr-NoClip       NA        
+#>  9 2015-DWOR-DWOR-NFClearwaterR-AdClip   NA        
+#> 10 2016-CLWH-SFCR-MeadowCr-NoClip        NA        
+#> # ... with 28 more rows
+#> 
+#> $W
+#> # A tibble: 10 x 2
+#>    var1   stockGroup
+#>    <chr>  <lgl>     
+#>  1 GRROND NA        
+#>  2 IMNAHA NA        
+#>  3 LOCLWR NA        
+#>  4 LOSALM NA        
+#>  5 LSNAKE NA        
+#>  6 MFSALM NA        
+#>  7 SFCLWR NA        
+#>  8 SFSALM NA        
+#>  9 UPCLWR NA        
+#> 10 UPSALM NA
+
+#So the templates object now has three tibbles, one for each rear type, 
+#that give us the categories we need to assign to stock groups. 
+#You could save these to csv files and edit them manually, or 
+#edit these all in R, but regardless, you should end up with all the values 
+#in the "stockGroup" columns matching values in nf[[1]][[1]]$stockGroup.
+
+#For this dataset, we have a tibble showing the correspondence of 
+#the PBT release groups and stock grps that we will use:
+sthd_stockGroup
+#> # A tibble: 58 x 2
+#>    releaseGroup                                                       stockGroup
+#>    <chr>                                                              <chr>     
+#>  1 Unassigned                                                         lower     
+#>  2 2015-IRRI-WALL-GrandeRondeR/WallowaR                               upper     
+#>  3 2015-LYON-TUCA-TucannonR-WA                                        lower     
+#>  4 2015-NIAG-OXBO-SnakeR-HellsCanyon-AdClip                           upper     
+#>  5 2015-IRRI-IMNA-Imnaha                                              upper     
+#>  6 2016-HNFH-EFNA-EastForkSalmonR-NoClip                              upper     
+#>  7 2015-HNFH-SAWT-SawtoothFH-AdClip                                   upper     
+#>  8 2016-IRRI-WALL-GrandeRondeR/WallowaR                               upper     
+#>  9 2015-LYON-CGRW-CottonWoodGR/WallowaR/LyonsFerry/Touchet/WallaWall~ mix       
+#> 10 2016-IRRI-IMNA-Imnaha                                              upper     
+#> # ... with 48 more rows
+
+##CMB 10-27-21: If just need to run model through for example, change groups with 0 PIT detections to upper for EXAMPLE purposes ONLY. must fix before running model for reals.
+
+
+#So let's fill in the templates:
+#library(tidyverse) # these operations are WAY easier with the tidyverse
+#> Warning: package 'tidyverse' was built under R version 4.0.4
+#> -- Attaching packages --------------------------------------- tidyverse 1.3.0 --
+#> v ggplot2 3.3.2     v purrr   0.3.4
+#> v tibble  3.1.0     v dplyr   1.0.5
+#> v tidyr   1.1.3     v stringr 1.4.0
+#> v readr   1.4.0     v forcats 0.5.0
+#> Warning: package 'tibble' was built under R version 4.0.4
+#> Warning: package 'tidyr' was built under R version 4.0.4
+#> Warning: package 'dplyr' was built under R version 4.0.4
+#> -- Conflicts ------------------------------------------ tidyverse_conflicts() --
+#> x dplyr::filter() masks stats::filter()
+#> x dplyr::lag()    masks stats::lag()
+
+#FOR STHD: stock groups assigned based on data from sthd_splitPITdata and sthd_stockGroup objects:
+# HNC (Hatchery ad-intact fish)
+templates$HNC <- templates$HNC %>% select(-stockGroup) %>% 
+  left_join(sthd_stockGroup, by = c("var1" = "releaseGroup"))
+# assigning the groups created by splitByPIT
+templates$HNC <- templates$HNC %>% 
+  mutate(stockGroup = ifelse(is.na(stockGroup) & grepl("_lower$", var1), "lower", 
+                             ifelse(is.na(stockGroup) & grepl("_upper$", var1), "upper", stockGroup)))
+
+# H (Hatchery ad-clipped fish)
+templates$H <- templates$H %>% select(-stockGroup) %>% 
+  left_join(sthd_stockGroup, by = c("var1" = "releaseGroup"))
+# assigning the groups create by splitByPIT
+templates$H <- templates$H %>% 
+  mutate(stockGroup = ifelse(is.na(stockGroup) & grepl("_lower$", var1), "lower", 
+                             ifelse(is.na(stockGroup) & grepl("_upper$", var1), "upper", stockGroup)))
+
+#And for the W fish (wild origin), only the "LSNAKE" stock is "lower":
+templates$W$stockGroup <- ifelse(templates$W$var1 == "LSNAKE", "lower", "upper")
+
+templates
+#> $H
+#> # A tibble: 44 x 2
+#>    var1                                                stockGroup
+#>    <chr>                                               <chr>     
+#>  1 2015-DWOR-DWOR-NFClearwaterR-AdClip                 upper     
+#>  2 2015-HNFH-SAWT-SawtoothFH-AdClip                    upper     
+#>  3 2015-IRRI-IMNA-Imnaha                               upper     
+#>  4 2015-IRRI-WALL-GrandeRondeR/WallowaR                upper     
+#>  5 2015-LYON-TUCA-TucannonR-WA                         lower     
+#>  6 2015-MVFH-PAHS-UpperSalmonR-BelowPahsimeoriR-AdClip upper     
+#>  7 2015-NIAG-OXBO-SnakeR-HellsCanyon-AdClip            upper     
+#>  8 2015-NIAG-PAHS-PahsimeroiR-AdClip                   upper     
+#>  9 2016-HNFH-SAWT-SawtoothFH-AdClip                    upper     
+#> 10 2016-IRRI-IMNA-Imnaha                               upper     
+#> # ... with 34 more rows
+#> 
+#> $HNC
+#> # A tibble: 38 x 2
+#>    var1                                  stockGroup
+#>    <chr>                                 <chr>     
+#>  1 2015-CLWH-SFCR-MeadowCr-NoClip        upper     
+#>  2 2015-HNFH-EFNA-EastForkSalmonR-NoClip upper     
+#>  3 2015-IRRI-IMNA-Imnaha                 upper     
+#>  4 2015-LYON-TUCA-TucannonR-WA           lower     
+#>  5 2016-HNFH-EFNA-EastForkSalmonR-NoClip upper     
+#>  6 2016-IRRI-IMNA-Imnaha                 upper     
+#>  7 Unassigned                            lower     
+#>  8 2015-CLWH-SFCR-NewsomeCr-NoClip       upper     
+#>  9 2015-DWOR-DWOR-NFClearwaterR-AdClip   upper     
+#> 10 2016-CLWH-SFCR-MeadowCr-NoClip        upper     
+#> # ... with 28 more rows
+#> 
+#> $W
+#> # A tibble: 10 x 2
+#>    var1   stockGroup
+#>    <chr>  <chr>     
+#>  1 GRROND upper     
+#>  2 IMNAHA upper     
+#>  3 LOCLWR upper     
+#>  4 LOSALM upper     
+#>  5 LSNAKE lower     
+#>  6 MFSALM upper     
+#>  7 SFCLWR upper     
+#>  8 SFSALM upper     
+#>  9 UPCLWR upper     
+#> 10 UPSALM upper
+
+
+#And now the template has been filled in. 
+#We can visually inspect to make sure only 
+#valid values (and no NAs) are present:
+for(i in 1:3){
+  templates[[i]] %>% count(stockGroup) %>% print
+}
+#stockGroup     n
+#<chr>      <int>
+#1 lower          3
+#2 upper         40
+#3 NA             1
+# A tibble: 3 × 2
+#stockGroup     n
+#<chr>      <int>
+#1 lower          4
+#2 upper         38
+#3 NA             1
+# A tibble: 2 × 2
+#stockGroup     n
+#<chr>      <int>
+#1 lower          1
+#2 upper          9
+#CMB: ^these 3 tibbels correspond to H, HNC, and W
+
+#Now we apply the fallback rates and generate a summary output:
+est_escp <- apply_fallback_rates(breakdown = est_comp, 
+                                 fallback_rates = nf$fallback_rates,
+                                 split_H_fallback = "var1",
+                                 split_HNC_fallback = "var1",
+                                 split_W_fallback = "var1",
+                                 H_groups = templates$H, HNC_groups = templates$HNC, 
+                                 W_groups = templates$W,
+                                 stratAssign_fallback = stratFallback, stratAssign_comp = stratComp, 
+                                 alpha_ci = alpha_ci, output_type = "summary") #error-'Missing an entry for H. Returning a list of partially filled in templates'. Occurred when doing RUN 1 (using 1,000 bootstraps) when the row of unassigned fish had NA for stock group
+
+
+#There are two parts of the summary output. 
+#The first is a tibble with escapement estimates and CIs for 
+#all groups (rear, var1, var2) estimated:
+est_escp$output #CMB: here is where categories may be different (gensex, total age, etc). can write out to csv or excel. NULL error-refers to an object and is returned when an expression or function results in an undefined value.
+#> # A tibble: 112 x 6
+#>    rear  var1                                     var2  pointEst    lci    uci
+#>    <chr> <chr>                                    <chr>    <dbl>  <dbl>  <dbl>
+#>  1 H     2014-DWOR-DWOR-NFClearwaterR-AdClip      <NA>      62.7   20.5   92.3
+#>  2 H     2014-DWOR-DWOR-RedHouseHole-AdClip       <NA>      17.5    0     43.8
+#>  3 H     2015-CLWH-SFCR-MeadowCr-AdClip           <NA>    1377.  1159.  1579. 
+#>  4 H     2015-CLWH-SFCR-RedHouseHole-AdClip       <NA>    1189.   996.  1399. 
+#>  5 H     2015-DWOR-DWOR-ClearCr-AdClip            <NA>    1430.  1311.  1633. 
+#>  6 H     2015-DWOR-DWOR-NFClearwaterR-AdClip      <NA>    9568.  9256.  9962. 
+#>  7 H     2015-DWOR-DWOR-RedHouseHole-AdClip       <NA>    1549.  1315.  1788. 
+#>  8 H     2015-HNFH-SAWT-McNabbUpperSalmonR-AdClip <NA>      85.7   44.9  149. 
+#>  9 H     2015-HNFH-SAWT-SawtoothFH-AdClip         <NA>    1023.   912.  1275. 
+#> 10 H     2015-IRRI-IMNA-Imnaha                    <NA>     515.   391.   586. 
+#> # ... with 102 more rows
+
+#example to find data I want:
+est_escp$output %>% filter(rear == "W", var1 == "LSNAKE", var2 == "Lg") #gives me all wild fish from LSNAKE that were Lg
+# A tibble: 3 x 6
+#rear  var1   var2  pointEst    lci   uci
+#<chr> <chr>  <chr>    <dbl>  <dbl> <dbl>
+#  1 W  LSNAKE Lg    132.   83.8  167.
+#2 W   LSNAKE Sm    1918. 1835.  2287.
+#3 W  LSNAKE NA    2051. 1945.  2432. #first two lines sum up to this line - the overall estimate for LSNAKE.
+
+#and the second is the point estimates and CIs for 
+#the total escapement and the three rear types:
+est_escp_rearType <- est_escp$rearType
+#> # A tibble: 4 x 4
+#>   rear  pointEst    lci    uci
+#>   <chr>    <dbl>  <dbl>  <dbl>
+#> 1 H       41045. 40694. 41877.
+#> 2 HNC      3817.  3652.  3945.
+#> 3 W        8063.  8021.  8418.
+#> 4 All     52925. 52682. 53704.
+
+
+# TO GET FULL OUTPUT (with bootstrap and stratum breakdown),
+#useful to calculate something that package isn't automatically estimating.
+full_est_escp <- apply_fallback_rates(breakdown = est_comp, fallback_rates = nf$fallback_rates,
+                                      split_H_fallback = "var1",
+                                      split_HNC_fallback = "var1",
+                                      split_W_fallback = "var1",
+                                      H_groups = templates$H, HNC_groups = templates$HNC,
+                                      W_groups = templates$W,
+                                      stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                      alpha_ci = alpha_ci, output_type = "full") #CMB: this is FULL output, gives summary plus additional output, and all internal estimates (ex: escapement within each stratum, and bootstrap estimates for each stratum. WIL BE HUGE!)
+full_est_escp
+#> $output
+#> # A tibble: 112 x 6
+#>    rear  var1                                     var2  pointEst    lci    uci
+#>    <chr> <chr>                                    <chr>    <dbl>  <dbl>  <dbl>
+#>  1 H     2014-DWOR-DWOR-NFClearwaterR-AdClip      <NA>      62.7   20.5   92.3
+#>  2 H     2014-DWOR-DWOR-RedHouseHole-AdClip       <NA>      17.5    0     43.8
+#>  3 H     2015-CLWH-SFCR-MeadowCr-AdClip           <NA>    1377.  1159.  1579. 
+#>  4 H     2015-CLWH-SFCR-RedHouseHole-AdClip       <NA>    1189.   996.  1399. 
+#>  5 H     2015-DWOR-DWOR-ClearCr-AdClip            <NA>    1430.  1311.  1633. 
+#>  6 H     2015-DWOR-DWOR-NFClearwaterR-AdClip      <NA>    9568.  9256.  9962. 
+#>  7 H     2015-DWOR-DWOR-RedHouseHole-AdClip       <NA>    1549.  1315.  1788. 
+#>  8 H     2015-HNFH-SAWT-McNabbUpperSalmonR-AdClip <NA>      85.7   44.9  149. 
+#>  9 H     2015-HNFH-SAWT-SawtoothFH-AdClip         <NA>    1023.   912.  1275. 
+#> 10 H     2015-IRRI-IMNA-Imnaha                    <NA>     515.   391.   586. 
+#> # ... with 102 more rows
+#> 
+#> $full_breakdown_H
+#> # A tibble: 336 x 5
+#>    rear  stratum var1                                                var2  total
+#>    <chr>   <dbl> <chr>                                               <chr> <dbl>
+#>  1 H           1 2015-DWOR-DWOR-NFClearwaterR-AdClip                 <NA>   91.0
+#>  2 H           1 2015-HNFH-SAWT-SawtoothFH-AdClip                    <NA>   22.3
+#>  3 H           1 2015-IRRI-IMNA-Imnaha                               <NA>  115. 
+#>  4 H           1 2015-IRRI-WALL-GrandeRondeR/WallowaR                <NA>  244. 
+#>  5 H           1 2015-LYON-TUCA-TucannonR-WA                         <NA>   71.7
+#>  6 H           1 2015-MVFH-PAHS-UpperSalmonR-BelowPahsimeoriR-AdClip <NA>   46.4
+#>  7 H           1 2015-NIAG-OXBO-SnakeR-HellsCanyon-AdClip            <NA>  179. 
+#>  8 H           1 2015-NIAG-PAHS-PahsimeroiR-AdClip                   <NA>   44.1
+#>  9 H           1 2016-HNFH-SAWT-SawtoothFH-AdClip                    <NA>  130. 
+#> 10 H           1 2016-IRRI-IMNA-Imnaha                               <NA>   44.8
+#> # ... with 326 more rows
+#> 
+#> $full_breakdown_HNC
+#> # A tibble: 168 x 5
+#>    rear  stratum var1                                  var2  total
+#>    <chr>   <dbl> <chr>                                 <chr> <dbl>
+#>  1 HNC         1 2015-CLWH-SFCR-MeadowCr-NoClip        <NA>   3.19
+#>  2 HNC         1 2015-HNFH-EFNA-EastForkSalmonR-NoClip <NA>   5.71
+#>  3 HNC         1 2015-IRRI-IMNA-Imnaha                 <NA>   3.27
+#>  4 HNC         1 2015-LYON-TUCA-TucannonR-WA           <NA>  10.2 
+#>  5 HNC         1 2016-HNFH-EFNA-EastForkSalmonR-NoClip <NA>  20.0 
+#>  6 HNC         1 2016-IRRI-IMNA-Imnaha                 <NA>   3.08
+#>  7 HNC         1 Unassigned                            <NA>   4.29
+#>  8 HNC         2 2015-CLWH-SFCR-MeadowCr-NoClip        <NA>  20.7 
+#>  9 HNC         2 2015-CLWH-SFCR-NewsomeCr-NoClip       <NA>   9.35
+#> 10 HNC         2 2015-DWOR-DWOR-NFClearwaterR-AdClip   <NA>   5.20
+#> # ... with 158 more rows
+#> 
+#> $full_breakdown_W
+#> # A tibble: 324 x 5
+#>    rear  stratum var1   var2     total
+#>    <chr>   <dbl> <chr>  <chr>    <dbl>
+#>  1 W           1 GRROND Lg    6.39e-54
+#>  2 W           1 GRROND Sm    3.92e+ 2
+#>  3 W           1 GRROND <NA>  3.92e+ 2
+#>  4 W           1 IMNAHA Lg    8.60e- 7
+#>  5 W           1 IMNAHA Sm    5.75e+ 1
+#>  6 W           1 IMNAHA <NA>  5.75e+ 1
+#>  7 W           1 LOCLWR Lg    1.88e- 6
+#>  8 W           1 LOCLWR Sm    4.90e+ 1
+#>  9 W           1 LOCLWR <NA>  4.90e+ 1
+#> 10 W           1 LOSALM Lg    7.79e- 5
+#> # ... with 314 more rows
+#> 
+#> $boot_breakdown_H
+#> # A tibble: 3,360 x 6
+#>    rear  var1                                          var2  total stratum  boot
+#>    <chr> <chr>                                         <chr> <dbl>   <dbl> <int>
+#>  1 H     2015-DWOR-DWOR-NFClearwaterR-AdClip           <NA>   44.8       1     1
+#>  2 H     2015-HNFH-SAWT-SawtoothFH-AdClip              <NA>   22.1       1     1
+#>  3 H     2015-IRRI-IMNA-Imnaha                         <NA>  180.        1     1
+#>  4 H     2015-IRRI-WALL-GrandeRondeR/WallowaR          <NA>  220.        1     1
+#>  5 H     2015-LYON-TUCA-TucannonR-WA                   <NA>   22.0       1     1
+#>  6 H     2015-MVFH-PAHS-UpperSalmonR-BelowPahsimeoriR~ <NA>   90.7       1     1
+#>  7 H     2015-NIAG-OXBO-SnakeR-HellsCanyon-AdClip      <NA>  133.        1     1
+#>  8 H     2015-NIAG-PAHS-PahsimeroiR-AdClip             <NA>   87.8       1     1
+#>  9 H     2016-HNFH-SAWT-SawtoothFH-AdClip              <NA>  195.        1     1
+#> 10 H     2016-IRRI-IMNA-Imnaha                         <NA>    0         1     1
+#> # ... with 3,350 more rows
+#> 
+#> $boot_breakdown_HNC
+#> # A tibble: 1,680 x 6
+#>    rear  var1                                  var2  total stratum  boot
+#>    <chr> <chr>                                 <chr> <dbl>   <dbl> <int>
+#>  1 HNC   2015-CLWH-SFCR-MeadowCr-NoClip        <NA>   3.17       1     1
+#>  2 HNC   2015-HNFH-EFNA-EastForkSalmonR-NoClip <NA>   8.52       1     1
+#>  3 HNC   2015-IRRI-IMNA-Imnaha                 <NA>   3.25       1     1
+#>  4 HNC   2015-LYON-TUCA-TucannonR-WA           <NA>   6.34       1     1
+#>  5 HNC   2016-HNFH-EFNA-EastForkSalmonR-NoClip <NA>  11.4        1     1
+#>  6 HNC   2016-IRRI-IMNA-Imnaha                 <NA>   0          1     1
+#>  7 HNC   Unassigned                            <NA>   4.65       1     1
+#>  8 HNC   2015-CLWH-SFCR-MeadowCr-NoClip        <NA>  29.8        2     1
+#>  9 HNC   2015-CLWH-SFCR-NewsomeCr-NoClip       <NA>   8.98       2     1
+#> 10 HNC   2015-DWOR-DWOR-NFClearwaterR-AdClip   <NA>   4.99       2     1
+#> # ... with 1,670 more rows
+#> 
+#> $boot_breakdown_W
+#> # A tibble: 3,240 x 6
+#>    rear  var1   var2     total stratum  boot
+#>    <chr> <chr>  <chr>    <dbl>   <dbl> <int>
+#>  1 W     GRROND Lg    1.12e-54       1     1
+#>  2 W     GRROND Sm    4.01e+ 2       1     1
+#>  3 W     GRROND <NA>  4.01e+ 2       1     1
+#>  4 W     IMNAHA Lg    2.87e+ 0       1     1
+#>  5 W     IMNAHA Sm    6.31e+ 1       1     1
+#>  6 W     IMNAHA <NA>  6.60e+ 1       1     1
+#>  7 W     LOCLWR Lg    4.94e- 6       1     1
+#>  8 W     LOCLWR Sm    4.59e+ 1       1     1
+#>  9 W     LOCLWR <NA>  4.59e+ 1       1     1
+#> 10 W     LOSALM Lg    3.19e- 5       1     1
+#> # ... with 3,230 more rows
+
+#^This has a lot. The first is the same tibble with point estimates 
+#and CIs. Then the "full_breakdown_*" have the point estimates by 
+#strata and the "boot_breakdown_*" have the estimates by strata for 
+#each bootstrap iteration. These are mostly useful to do fancy things 
+#that aren't explicitly programmed into the package. For example, 
+#if you want to know the marginal totals and CIs for var2, 
+#you can do something like this:
+
+### to calculate marginal totals and CIs for var2
+marginal_var2 <- full_est_escp$output %>%
+  # point estimate
+  filter(!is.na(var2)) %>% group_by(rear, var2) %>%
+  summarise(pointEst = sum(pointEst), .groups = "drop_last") %>%
+  left_join(
+    # CIs
+    bind_rows(full_est_escp$boot_breakdown_H, full_est_escp$boot_breakdown_HNC, full_est_escp$boot_breakdown_W) %>%
+      filter(!is.na(var2)) %>% group_by(rear, var2, boot) %>% summarise(total = sum(total), .groups = "drop_last") %>%
+      summarise(lci = quantile(total, alpha_ci / 2),
+                uci = quantile(total, 1 - (alpha_ci / 2)), .groups = "drop_last"),
+    by = c("rear", "var2")
+  )
+########################################################################################################
+#to get STHD ByHat estimates (release group is nested within ByHat):
+marginal_BYHAT <- full_est_escp$output %>%
+  # point estimate
+  filter(is.na(var2)) %>% mutate(var1 = substr(var1, 1, 14)) %>% group_by(rear, var1) %>%
+  summarise(pointEst = sum(pointEst), .groups = "drop_last") %>%
+  left_join(
+    # CIs
+    bind_rows(full_est_escp$boot_breakdown_H, full_est_escp$boot_breakdown_HNC, full_est_escp$boot_breakdown_W) %>%
+      filter(is.na(var2)) %>% mutate(var1 = substr(var1, 1, 14))  %>% group_by(rear, var1, boot) %>% summarise(total = sum(total), .groups = "drop_last") %>%
+      summarise(lci = quantile(total, alpha_ci / 2),
+                uci = quantile(total, 1 - (alpha_ci / 2)), .groups = "drop_last"),
+    by = c("rear", "var1")
+  ) %>% filter(rear %in% c("H", "HNC"))
+
+########################################################################################################
+#to get MPG estimates:
+
+#copy output data frames:
+full_est_escp$output2 <- full_est_escp$output
+full_est_escp$boot_breakdown_H2 <- full_est_escp$boot_breakdown_H
+full_est_escp$boot_breakdown_HNC2 <- full_est_escp$boot_breakdown_HNC
+full_est_escp$boot_breakdown_W2 <- full_est_escp$boot_breakdown_W
+
+#STHD: change each Genstock into correct MPG in each dataframe:
+full_est_escp$output2 [full_est_escp$output2 == 'LOSALM'] <- 'SALMON' # vertical bar where you can add more stuff to this argument
+full_est_escp$output2 [full_est_escp$output2 == 'SFSALM'] <- 'SALMON'
+full_est_escp$output2 [full_est_escp$output2 == 'UPSALM'] <- 'SALMON'
+full_est_escp$output2 [full_est_escp$output2 == 'MFSALM'] <- 'SALMON'
+full_est_escp$output2 [full_est_escp$output2 == 'CHMBLN'] <- 'SALMON'
+full_est_escp$output2 [full_est_escp$output2 == 'UPCLWR'] <- 'CLRWTR'
+full_est_escp$output2 [full_est_escp$output2 == 'SFCLWR'] <- 'CLRWTR'
+full_est_escp$output2 [full_est_escp$output2 == 'LOCLWR'] <- 'CLRWTR'
+
+full_est_escp$boot_breakdown_H2 [full_est_escp$boot_breakdown_H2 == 'LOSALM'] <- 'SALMON'
+full_est_escp$boot_breakdown_H2 [full_est_escp$boot_breakdown_H2 == 'SFSALM'] <- 'SALMON'
+full_est_escp$boot_breakdown_H2 [full_est_escp$boot_breakdown_H2 == 'UPSALM'] <- 'SALMON'
+full_est_escp$boot_breakdown_H2 [full_est_escp$boot_breakdown_H2 == 'MFSALM'] <- 'SALMON'
+full_est_escp$boot_breakdown_H2 [full_est_escp$boot_breakdown_H2 == 'CHMBLN'] <- 'SALMON'
+full_est_escp$boot_breakdown_H2 [full_est_escp$boot_breakdown_H2 == 'UPCLWR'] <- 'CLRWTR'
+full_est_escp$boot_breakdown_H2 [full_est_escp$boot_breakdown_H2 == 'SFCLWR'] <- 'CLRWTR'
+full_est_escp$boot_breakdown_H2 [full_est_escp$boot_breakdown_H2 == 'LOCLWR'] <- 'CLRWTR'
+
+full_est_escp$boot_breakdown_HNC2 [full_est_escp$boot_breakdown_HNC2 == 'LOSALM'] <- 'SALMON'
+full_est_escp$boot_breakdown_HNC2 [full_est_escp$boot_breakdown_HNC2 == 'SFSALM'] <- 'SALMON'
+full_est_escp$boot_breakdown_HNC2 [full_est_escp$boot_breakdown_HNC2 == 'UPSALM'] <- 'SALMON'
+full_est_escp$boot_breakdown_HNC2 [full_est_escp$boot_breakdown_HNC2 == 'MFSALM'] <- 'SALMON'
+full_est_escp$boot_breakdown_HNC2 [full_est_escp$boot_breakdown_HNC2 == 'CHMBLN'] <- 'SALMON'
+full_est_escp$boot_breakdown_HNC2 [full_est_escp$boot_breakdown_HNC2 == 'UPCLWR'] <- 'CLRWTR'
+full_est_escp$boot_breakdown_HNC2 [full_est_escp$boot_breakdown_HNC2 == 'SFCLWR'] <- 'CLRWTR'
+full_est_escp$boot_breakdown_HNC2 [full_est_escp$boot_breakdown_HNC2 == 'LOCLWR'] <- 'CLRWTR'
+
+full_est_escp$boot_breakdown_W2 [full_est_escp$boot_breakdown_W2 == 'LOSALM'] <- 'SALMON'
+full_est_escp$boot_breakdown_W2 [full_est_escp$boot_breakdown_W2 == 'SFSALM'] <- 'SALMON'
+full_est_escp$boot_breakdown_W2 [full_est_escp$boot_breakdown_W2 == 'UPSALM'] <- 'SALMON'
+full_est_escp$boot_breakdown_W2 [full_est_escp$boot_breakdown_W2 == 'MFSALM'] <- 'SALMON'
+full_est_escp$boot_breakdown_W2 [full_est_escp$boot_breakdown_W2 == 'CHMBLN'] <- 'SALMON'
+full_est_escp$boot_breakdown_W2 [full_est_escp$boot_breakdown_W2 == 'UPCLWR'] <- 'CLRWTR'
+full_est_escp$boot_breakdown_W2 [full_est_escp$boot_breakdown_W2 == 'SFCLWR'] <- 'CLRWTR'
+full_est_escp$boot_breakdown_W2 [full_est_escp$boot_breakdown_W2 == 'LOCLWR'] <- 'CLRWTR'
+
+
+#calculate MPG totals w/ CIs:
+marginal_MPG <- full_est_escp$output2 %>%
+  # point estimate
+  filter(is.na(var2)) %>% group_by(rear, var1) %>%
+  summarise(pointEst = sum(pointEst), .groups = "drop_last") %>%
+  left_join(
+    # CIs
+    bind_rows(full_est_escp$boot_breakdown_H2, full_est_escp$boot_breakdown_HNC2, full_est_escp$boot_breakdown_W2) %>%
+      filter(is.na(var2)) %>% group_by(rear, var1, boot) %>% summarise(total = sum(total), .groups = "drop_last") %>%
+      summarise(lci = quantile(total, alpha_ci / 2),
+                uci = quantile(total, 1 - (alpha_ci / 2)), .groups = "drop_last"),
+    by = c("rear", "var1")
+  ) %>% filter(rear == "W")
+
+##########################################################################################################################
+
+###OR, if you want to know the overall fallback rates and get their 95% CIs, 
+#you can do something like this:
+# calculate point estimate of overall fallback rate
+fallPoint <- est_comp[[1]] %>% filter(is.na(var2)) %>% group_by(rear, var1) %>%
+  summarise(total = sum(total)) %>% 
+  full_join(est_escp$output %>% filter(is.na(var2))) %>% 
+  left_join(bind_rows(templates$H %>% mutate(rear = "H"), templates$HNC %>% mutate(rear = "HNC"), 
+                      templates$W %>% mutate(rear = "W"))) %>% group_by(stockGroup) %>%
+  summarise(total = sum(total), pointEst = sum(pointEst)) %>%
+  mutate(p_fa = 1 - (pointEst / total))
+#> `summarise()` has grouped output by 'rear'. You can override using the `.groups` argument.
+#> Joining, by = c("rear", "var1")
+#> Joining, by = c("rear", "var1")
+
+#CMB: p_fa is calculated by total and pointEst
+
+# get full output to calculate CIs (if you want CIs for fallback rates for lower and upper stock groups)
+full <- apply_fallback_rates(breakdown = est_comp, fallback_rates = nf$fallback_rates,
+                             split_H_fallback = "var1",
+                             split_HNC_fallback = "var1",
+                             split_W_fallback = "var1",
+                             H_groups = templates$H, HNC_groups = templates$HNC, W_groups = templates$W,
+                             stratAssign_fallback = stratFallback, stratAssign_comp = stratComp, alpha_ci = alpha_ci,
+                             output_type = "full")
+fallCI <- bind_rows(full$boot_breakdown_H, full$boot_breakdown_HNC, full$boot_breakdown_W) %>%
+  filter(is.na(var2)) %>% group_by(boot, rear, var1) %>%
+  summarise(escapement = sum(total)) %>% 
+  full_join(est_comp[[2]] %>% filter(is.na(var2)) %>% group_by(boot, rear, var1) %>%
+              summarise(total = sum(total))) %>% 
+  left_join(bind_rows(templates$H %>% mutate(rear = "H"), templates$HNC %>% mutate(rear = "HNC"), 
+                      templates$W %>% mutate(rear = "W"))) %>% group_by(boot, stockGroup) %>%
+  summarise(total = sum(total), escapement = sum(escapement)) %>%
+  mutate(p_fa = 1 - (escapement / total)) %>% group_by(stockGroup) %>%
+  summarise(lci = quantile(p_fa, .025), uci = quantile(p_fa, .975))
+#> `summarise()` has grouped output by 'boot', 'rear'. You can override using the `.groups` argument.
+#> `summarise()` has grouped output by 'boot', 'rear'. You can override using the `.groups` argument.
+#> Joining, by = c("boot", "rear", "var1")
+#> Joining, by = c("rear", "var1")
+#> `summarise()` has grouped output by 'boot'. You can override using the `.groups` argument.
+OverallFallbackRates <- full_join(fallPoint, fallCI) #CMB: combines rates plus CIs
+#> Joining, by = "stockGroup"
+#> # A tibble: 2 x 6
+#>   stockGroup  total pointEst   p_fa    lci    uci
+#>   <chr>       <dbl>    <dbl>  <dbl>  <dbl>  <dbl>
+#> 1 lower       3071.    2805. 0.0867 0.0272 0.116 
+#> 2 upper      51723.   50120. 0.0310 0.0274 0.0402
+
+
+#FYI: Use this code to produce output of the samples sizes used (eventually merge this w/ estimates output like SCRAPI model does!)
+Samp_sizes <- trap %>% mutate(rear = ifelse(LGDMarkAD == "AD", "H",
+                                            ifelse(physTag | (!is.na(releaseGroup) & releaseGroup != "Unassigned"), "HNC",
+                                                   ifelse(is.na(releaseGroup), NA, "W")))) %>%
+  filter(!is.na(rear), rear == enter_one_rear_type_here) %>%
+  count(var1 = enter_the_var1_of_interest_here, var2 = enter_var2_here_if_applicable) #add code like what's in Corey RMD LGtrap data prep file that adds a row of the total sample size (sums individual group sample sizes). Corey already created Rear col in LGTrap data prep so it appears in final trap data. I thinks it's easier to sum sample sizes by filtering on final trap data in Excel. Exclude problem fish: duplicate samples or cause model error (only 1 fish from a stock in a stratum that also doesn't have an age estimate) since those are included in Progeny database and in final trap data but excluded from EASE analysis. Get problem fish from EFGL and from problemMasterIDs R obj in data prep (latter should be noted in input file checklist). Use vlookup to distinguish btw wild and unclipped hatchery fish in the gsi draws notes file
+
+
+
+#And there is a third output: if Nez Perce needs estimates for DABOM model, generate this and send to them.
+est_escp_DABOM <- apply_fallback_rates(breakdown = est_comp, fallback_rates = nf$fallback_rates,
+                                       split_H_fallback = "var1",
+                                       split_HNC_fallback = "var1",
+                                       split_W_fallback = "var1",
+                                       H_groups = templates$H, HNC_groups = templates$HNC, 
+                                       W_groups = templates$W,
+                                       stratAssign_fallback = stratFallback, stratAssign_comp = stratComp, 
+                                       alpha_ci = 0.1, output_type = "W_boot") #CI is 90% for DABOM so use alpha=0.1
+est_escp_DABOM
+#> $output
+#> # A tibble: 112 x 6
+#>    rear  var1                                     var2  pointEst    lci    uci
+#>    <chr> <chr>                                    <chr>    <dbl>  <dbl>  <dbl>
+#>  1 H     2014-DWOR-DWOR-NFClearwaterR-AdClip      <NA>      62.7   20.5   92.3
+#>  2 H     2014-DWOR-DWOR-RedHouseHole-AdClip       <NA>      17.5    0     43.8
+#>  3 H     2015-CLWH-SFCR-MeadowCr-AdClip           <NA>    1377.  1159.  1579. 
+#>  4 H     2015-CLWH-SFCR-RedHouseHole-AdClip       <NA>    1189.   996.  1399. 
+#>  5 H     2015-DWOR-DWOR-ClearCr-AdClip            <NA>    1430.  1311.  1633. 
+#>  6 H     2015-DWOR-DWOR-NFClearwaterR-AdClip      <NA>    9568.  9256.  9962. 
+#>  7 H     2015-DWOR-DWOR-RedHouseHole-AdClip       <NA>    1549.  1315.  1788. 
+#>  8 H     2015-HNFH-SAWT-McNabbUpperSalmonR-AdClip <NA>      85.7   44.9  149. 
+#>  9 H     2015-HNFH-SAWT-SawtoothFH-AdClip         <NA>    1023.   912.  1275. 
+#> 10 H     2015-IRRI-IMNA-Imnaha                    <NA>     515.   391.   586. 
+#> # ... with 102 more rows
+#> 
+#> $W_boot
+#> # A tibble: 10 x 12
+#>     boot   `1`   `2`   `3`   `4`   `5`   `6`   `7`   `8`   `9`  `10`  `11`
+#>    <int> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl> <dbl>
+#>  1     1 1102.  795. 1086.  956.  852.  529.  529.  387.  295.  637.  845.
+#>  2     2 1185.  891. 1094. 1003.  919.  571.  587.  387.  368.  525.  719.
+#>  3     3 1118. 1011. 1082.  836.  987.  535.  580.  385.  409.  573.  628.
+#>  4     4 1075.  999. 1110.  901.  966.  647.  496.  453.  372.  571.  722.
+#>  5     5 1053.  908. 1087.  989.  915.  573.  603.  460.  326.  695.  471.
+#>  6     6 1198.  896. 1047. 1058.  917.  511.  538.  414.  421.  487.  543.
+#>  7     7 1080.  936. 1078. 1011.  947.  655.  524.  447.  430.  524.  533.
+#>  8     8 1054.  939. 1087.  900. 1041.  684.  480.  496.  391.  716.  716.
+#>  9     9 1133.  795. 1107.  860.  972.  604.  560.  456.  389.  616.  667.
+#> 10    10 1050.  939. 1034.  923.  858.  537.  653.  465.  321.  528.  734.
+
+#The first output is again the same first summary table. 
+#The second is a tibble with one row for each bootstrap iteration 
+#and one column for each stratum. The values are the estimated 
+#number of wild fish for that stratum and iteration. This is 
+#intended to be used (with some minor formatting) as input for DABOM.
+
+#SAVE DABOM OUTPUT:
+write.csv(est_escp_DABOM$output,'SY2024STHD.estescp_DABOM_output_RUN5.csv',row.names = F)
+write.csv(est_escp_DABOM$W_boot,'SY2024STHD.estescp_DABOM_Wboot_RUN5.csv',row.names = F)
+
+
+###########################################################################################################
+#****IF YOU WANT TO ROUND YOUR OUTPUT ESTIMATES TO WHOLE FISH:******
+full_est_escp$output <- full_est_escp$output  %>% mutate(across(where(is.numeric), round, 0))
+full_est_escp$full_breakdown_H <- full_est_escp$full_breakdown_H  %>% mutate(across(where(is.numeric), round, 0))
+full_est_escp$full_breakdown_HNC <- full_est_escp$full_breakdown_HNC  %>% mutate(across(where(is.numeric), round, 0))
+full_est_escp$full_breakdown_W <- full_est_escp$full_breakdown_W  %>% mutate(across(where(is.numeric), round, 0))
+full_est_escp$boot_breakdown_H <- full_est_escp$boot_breakdown_H  %>% mutate(across(where(is.numeric), round, 0))
+full_est_escp$boot_breakdown_HNC <- full_est_escp$boot_breakdown_HNC  %>% mutate(across(where(is.numeric), round, 0))
+full_est_escp$boot_breakdown_W <- full_est_escp$boot_breakdown_W  %>% mutate(across(where(is.numeric), round, 0))
+marginal_var2 <- marginal_var2  %>% mutate(across(where(is.numeric), round, 0))
+est_escp_rearType <- est_escp_rearType  %>% mutate(across(where(is.numeric), round, 0))
+marginal_MPG <- marginal_MPG  %>% mutate(across(where(is.numeric), round, 0))
+marginal_BYHAT <- marginal_BYHAT  %>% mutate(across(where(is.numeric), round, 0))
+############################################################################################################
+
+
+#CMB: SAVE ESTIMATES!!
+#Required Saves:
+write.csv(full_est_escp$output, file = paste0("SY", sy, spp, "_", "full_est_escp_SUMMARY OUTPUT_RUN5.csv"),row.names = F) #summary output
+write.csv(marginal_var2, file = paste0("SY", sy, spp, "_", "marginal_var2_SUMMARY OUTPUT_RUN5.csv"),row.names = F)
+write.csv(est_escp_rearType, file = paste0("SY", sy, spp, "_", "rearType_SUMMARY OUTPUT_RUN5.csv"),row.names = F)
+write.csv(marginal_MPG, file = paste0("SY", sy, spp, "_", "marginal_MPG_SUMMARY OUTPUT_RUN1.csv"),row.names = F)
+write.csv(marginal_BYHAT, file = paste0("SY", sy, spp, "_", "marginal_BYHAT_SUMMARY OUTPUT_RUN1.csv"),row.names = F)
+
+#FYI Saves (don't have to save these to a file, they will be saved within the .rda analysis file)
+write.csv(full_est_escp$full_breakdown_H,"SY2022chnk_full_est_escp_full_breakdown_H.csv") #export for Katie McBaine at NR
+write.csv(full_est_escp$full_breakdown_HNC,"SY2022chnk_full_est_escp_full_breakdown_HNC.csv")#export for Katie McBaine at NR
+write.csv(full_est_escp$full_breakdown_W,"SY2022chnk_full_est_escp_full_breakdown_W.csv")
+write.csv(full_est_escp$boot_breakdown_H,"SY2022chnk_full_est_escp_boot_breakdown_H.csv")
+write.csv(full_est_escp$boot_breakdown_HNC,"SY2022chnk_full_est_escp_boot_breakdown_HNC.csv")
+write.csv(full_est_escp$boot_breakdown_W,"SY2022chnk_full_est_escp_boot_breakdown_W.csv")
+
+
+####### SAVE ALL OUTPUT / GLOBAL ENVIRONMENT ########
+save.image(file = paste0("SY", sy, spp, "_", 'ANALYSIS_RUN4REDO', "_numBoots", numBoots, ".rda")) #I like to use 'save workspace as' tool in the environment to save as .rda file. If using this code and .rda doesnt work, use file extension .RData
