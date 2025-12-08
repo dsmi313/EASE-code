@@ -113,7 +113,6 @@ pit_data %>%
   group_by(Period) %>%
   summarise(n = n(), 
             pct = round(n()/nrow(pit_data)*100, 1))
-
 #_________________________
 ### 5) Assign stock groups (aka the groups for which fallback/reascension is 
 #calculated separately for). The below code assigns all Chinook to the 
@@ -124,6 +123,21 @@ if(spp == "STHD"){
                                                          c("TUCR", "TUCH", "CURP", "WALLAR", "TOUCHR", "DAYP", "LYFE", "ASOTIC","ASOTNF","ASOTSF","CHARLC","TENMC","GEORGC"), "lower", "upper")) #CMB 10-13-21: added all Asotin Cr groups (ASOTIC, ASOTNF, ASOTSF, CHARLC(trib of Asotin)) to be LOWER, not upper. Per Tim Copeland's direction. added in ten mile and george cr for next year even tho they are not in this yrs data.
 } else {
   pit_data <- pit_data %>% mutate(stockGroup = "upper")
+}
+
+codes<-read.csv("Ptagis.csv")
+codes<-codes%>%rename(ReleaseSite=Code)
+
+pit_data<-pit_data%>%left_join(codes,by="ReleaseSite")
+
+
+if(spp == "STHD"){
+  pit_data <- pit_data %>% 
+    mutate(stockGroup = if_else(SubBasin %in% 
+                                  c("Lower Columbia-Sandy", "Umatilla", "Walla Walla", "Upper John Day",
+                                    "Lower Deschutes", "Klickitat", "Lower Yakima", "Upper Columbia-Priest Rapids",
+                                    "Methow", "Naches", "Lower Snake-Asotin"), 
+                                "lower", stockGroup))  # Use existing stockGroup instead of "upper"
 }
 
 
@@ -138,18 +152,19 @@ pit_data %>%
 pit_data %>%
   filter(stockGroup == "lower") %>%
   count(ReleaseSite) %>%
-  arrange(desc(n))
+  arrange(desc(n)) %>%
+  print(n = 75)
 
 
 #Collapsing repeat PIT detections of a unique tagID within a day into unique ascents (unique combo of date, TagID, and TagIDAscentCount). Each row is NOT a unique TagID or fish (checked with length(unique(pitData$TagID))):
-lgr_night_reasc_daily <- pit_data %>% 
-  select(Species, SpawnYear, stockGroup, Date, TagID, Period, TagIDAscentCount, laterAscend) %>%
+lgr_night_daily <- pit_data %>% 
+  select(Species, SpawnYear, stockGroup, Length, ReleaseSite, Date, TagID, Period, TagIDAscentCount, laterAscend,SubBasin) %>%
   distinct() %>% arrange(Date, TagID, TagIDAscentCount) %>% 
  filter(!is.na(Period)) 
 #CMB 10-14-21 IMPORTANT: ^the bottom line filters out any fish that have NA in Period column (likely were detected when trap was closed (Jan-Feb)). Approved by Bill. 
 
 # Check that distinct() worked correctly
-lgr_night_reasc_daily %>%
+lgr_night_daily %>%
   summarise(
     Total_Rows = n(),
     Unique_Ascents = n_distinct(paste(TagID, Date, TagIDAscentCount))
@@ -161,7 +176,7 @@ before_filter <- pit_data %>%
   select(Species, SpawnYear, stockGroup, Date, TagID, Period, TagIDAscentCount, laterAscend) %>%
   distinct()
 
-after_filter <- lgr_night_reasc_daily
+after_filter <- lgr_night_daily
 
 # Summary
 data.frame(
@@ -172,7 +187,7 @@ data.frame(
 )
 
 # Verify NO NAs remain in Period column
-lgr_night_reasc_daily %>%
+lgr_night_daily %>%
   filter(is.na(Period)) %>%
   nrow()  # Should be 0
 
@@ -219,10 +234,24 @@ if(nrow(spanDay) > 0){
 
 #_________________________
 ### 6) We now have PIT tag data that can be prepped for estimating escapement:
-print(lgr_night_reasc_daily, width = 1000)
+print(lgr_night_daily, width = 1000)
+
+# # A tibble: 3,540 × 11
+# Species SpawnYear stockGroup Length ReleaseSite Date       TagID          Period TagIDAscentCount laterAscend SubBasin            
+# <chr>       <dbl> <chr>       <dbl> <chr>       <date>     <chr>          <fct>             <dbl> <lgl>       <chr>               
+#   1 STHD         2025 upper         135 MINAMR      2024-07-01 3DD.003D6E7CEE D                     1 FALSE       Wallowa             
+# 2 STHD         2025 lower          94 CHARLC      2024-07-03 3DD.003D6BF3DE D                     1 FALSE       Lower Snake-Asotin  
+# 3 STHD         2025 upper          79 BCANF       2024-07-03 3DD.003D8C7270 D                     1 FALSE       Wallowa             
+# 4 STHD         2025 upper         232 LGRRBR      2024-07-03 3DD.003D9DEA54 D                     1 FALSE       Lower Snake-Tucannon
+# 5 STHD         2025 upper          NA LSHEEF      2024-07-05 3DD.003D325C7D D                     1 FALSE       Imnaha              
+# 6 STHD         2025 upper          NA LSHEEF      2024-07-05 3DD.003D325C7D D                     2 TRUE        Imnaha              
+# 7 STHD         2025 lower         165 CURP        2024-07-06 3DD.003D32DEB3 D                     1 FALSE       Lower Snake-Tucannon
+# 8 STHD         2025 lower         159 ASOTIC      2024-07-06 3DD.003D63CF1C D                     1 FALSE       Lower Snake-Asotin  
+# 9 STHD         2025 upper         122 GRAND2      2024-07-07 3DD.003D6E95DF D                     1 FALSE       Upper Grande Ronde  
+# 10 STHD         2025 lower         183 TUCR        2024-07-07 3DD.0077A5DC02 N                     1 FALSE       Lower Snake-Tucannon
 
 # Summary of final dataset
-lgr_night_reasc_daily %>%
+lgr_night_daily %>%
   summarise(
     Total_Ascents = n(),
     Unique_Fish = n_distinct(TagID),
@@ -232,23 +261,12 @@ lgr_night_reasc_daily %>%
   )
 
 # Period distribution (Day vs Night)
-lgr_night_reasc_daily %>%
+lgr_night_daily %>%
   group_by(Period) %>%
   summarise(n = n(), pct = round(n()/nrow(.)*100, 1))
 
-# Stock group distribution
-lgr_night_reasc_daily %>%
-  group_by(stockGroup) %>%
-  summarise(n = n(), pct = round(n()/nrow(.)*100, 1))
-
-# Fallback/Reascension summary by stock group
-lgr_night_reasc_daily %>%
-  group_by(stockGroup, TagIDAscentCount) %>%
-  summarise(n = n(), .groups = "drop") %>%
-  arrange(stockGroup, TagIDAscentCount)
-
 # Check for any NAs in critical columns
-lgr_night_reasc_daily %>%
+lgr_night_daily %>%
   summarise(
     NA_TagID = sum(is.na(TagID)),
     NA_Date = sum(is.na(Date)),
@@ -257,32 +275,24 @@ lgr_night_reasc_daily %>%
     NA_stockGroup = sum(is.na(stockGroup))
   )  # All should be 0
 
-#> # A tibble: 2,370 x 8
-#>    Species SpawnYear stockGroup Date       TagID          Period
-#>    <chr>       <dbl> <chr>      <date>     <chr>          <fct> 
-#>  1 STHD         2018 upper      2017-07-10 3DD.007771C8DE N     
-#>  2 STHD         2018 lower      2017-07-11 3DD.0077517A97 D     
-#>  3 STHD         2018 upper      2017-07-11 3DD.007771C8DE D     
-#>  4 STHD         2018 upper      2017-07-21 384.3B2397A967 D     
-#>  5 STHD         2018 upper      2017-07-27 3DD.00779953F7 D     
-#>  6 STHD         2018 upper      2017-07-28 3DD.0077995084 D     
-#>  7 STHD         2018 upper      2017-07-28 3DD.0077BAAAEE D     
-#>  8 STHD         2018 upper      2017-08-01 3DD.007778BA54 D     
-#>  9 STHD         2018 upper      2017-08-02 3DD.0077BAB934 D     
-#> 10 STHD         2018 upper      2017-08-10 3DD.007796BD52 D     
-#>    TagIDAscentCount ReAscent
-#>               <dbl> <lgl>   
-#>  1                1 FALSE   
-#>  2                1 FALSE   
-#>  3                2 TRUE    
-#>  4                1 FALSE   
-#>  5                1 FALSE   
-#>  6                1 FALSE   
-#>  7                1 FALSE   
-#>  8                1 FALSE   
-#>  9                1 FALSE   
-#> 10                1 FALSE   
-#> # ... with 2,360 more rows
+#remove fish tagged as adults from lower/upper classification in reascion
+lgr_reasc_daily<-lgr_night_daily%>%filter(Length<=400|is.na(Length))
+
+# Stock group distribution
+lgr_reasc_daily %>%
+  group_by(stockGroup) %>%
+  summarise(n = n(), pct = round(n()/nrow(.)*100, 1))
+
+# Fallback/Reascension summary by stock group
+lgr_reasc_daily %>%
+  group_by(stockGroup, TagIDAscentCount) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  arrange(stockGroup, TagIDAscentCount)
+
+
+#check subBasin
+lgr_reasc_daily %>%select(stockGroup,SubBasin)%>%distinct()%>%print(n=100)
+
 
 #Each row is intended to represent a unique ascension. Here is what the columns represent:
 #Species the species
@@ -297,7 +307,8 @@ lgr_night_reasc_daily %>%
 #___________________
 #If we want to export this data as a csv file, we run this code:
 write.csv(pit_data, file = paste0("SY",sy,spp,"_pit_data",".csv"),row.names = FALSE)
-write.csv(lgr_night_reasc_daily, file = paste0("SY",sy,spp,"_PITdata_lgr_night_reasc_daily",".csv"), row.names = FALSE)
+write.csv(lgr_night_daily, file = paste0("SY", sy, "_", spp, "_night_passage.csv"), row.names = FALSE)
+write.csv(lgr_reasc_daily, file = paste0("SY", sy, "_", spp, "_reascension.csv"), row.names = FALSE)
 write.csv(parsed, file = paste0("SY",sy,spp,"_parsed",".csv"),row.names = FALSE)
 
 #save global environment for reference:
