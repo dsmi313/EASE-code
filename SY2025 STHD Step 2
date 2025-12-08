@@ -65,7 +65,15 @@ write.csv(tagRates, 'SY2025STHD_tagRates.csv',row.names = F)
 
 
 # Format PIT-tag data -----------------------------------------------------
-pitData <- read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD_PITdata_lgr_night_reasc_daily.csv")
+# UPDATED: Now reading TWO separate files from Step 1C:
+# 1. night_passage.csv - includes ALL fish (even those tagged as adults)
+# 2. reascension.csv - excludes fish tagged as adults (Length > 400)
+
+# Read NIGHT PASSAGE data (includes all fish)
+pitData_night <- read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025_STHD_night_passage.csv")
+
+# Read REASCENSION data (excludes adult-tagged fish)
+pitData_reasc <- read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025_STHD_reascension.csv")
 
 #This data has been filtered/processed to have one row for every unique ascension not unique fish.
 #Some cols defined:
@@ -73,46 +81,53 @@ pitData <- read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE
 #2-The date the ascension occurred
 #3-The tagID
 #4-The time period, day (counting window open) or night (window closed), the ascension occurred
-#5-Whether this ascension resulted in a later fall back (TRUE) or 
-#not (FALSE). In other words TRUE if the fish later re-ascended, and 
-#FALSE if it did not. Note that because we are running this model without 
-#accounting for fallback withOUT reascension, this column could also 
+#5-Whether this ascension resulted in a later fall back (TRUE) or
+#not (FALSE). In other words TRUE if the fish later re-ascended, and
+#FALSE if it did not. Note that because we are running this model without
+#accounting for fallback withOUT reascension, this column could also
 #represent whether the PIT tag had previously ascended (TRUE) or not (FALSE)
 
 #Let's make sure the period column only includes D or N (no NAs) and laterAscend only includes TRUE or FALSE (no NAs).
-pitData %>% count(Period) #ok
-pitData %>% count(laterAscend)#ok
-head(pitData$Date)
-pitData <- pitData %>% mutate(Date = ymd(Date)) 
+pitData_night %>% count(Period) #ok
+pitData_night %>% count(laterAscend)#ok
+pitData_reasc %>% count(Period) #ok
+pitData_reasc %>% count(laterAscend)#ok
 
 # Load the date-week mapping file
 date_week_map <- read.csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD.dates.with.weekNums.csv")
-
-# Convert Date columns to Date format in both files
 date_week_map$Date <- as.Date(date_week_map$Date)
-pitData$Date <- ymd(pitData$Date)  # Use ymd since your dates are YYYY-MM-DD
 
-# Join to add weekNum column to pitData
-pitData <- pitData %>% 
+# Process NIGHT PASSAGE data
+pitData_night <- pitData_night %>%
+  mutate(Date = ymd(Date)) %>%
   left_join(date_week_map %>% select(Date, weekNum), by = "Date")
+colnames(pitData_night)[which(names(pitData_night) == "weekNum")] <- "sWeek"
+pitData_night <- pitData_night %>%
+  mutate(y = year(Date), w = sWeek) %>%
+  arrange(y, w) %>%
+  mutate(sWeek = paste0(y, "_", w))
 
-# Rename weekNum to sWeek (as required by EASE)
-colnames(pitData)[which(names(pitData) == "weekNum")] <- "sWeek"
+# Process REASCENSION data
+pitData_reasc <- pitData_reasc %>%
+  mutate(Date = ymd(Date)) %>%
+  left_join(date_week_map %>% select(Date, weekNum), by = "Date")
+colnames(pitData_reasc)[which(names(pitData_reasc) == "weekNum")] <- "sWeek"
+pitData_reasc <- pitData_reasc %>%
+  mutate(y = year(Date), w = sWeek) %>%
+  arrange(y, w) %>%
+  mutate(sWeek = paste0(y, "_", w))
 
-
-
-#12/3/22 CMB - create sWeek column if haven't done already:
-pitData <- pitData %>% mutate(y = year(Date), w = sWeek) %>% #CMB 10-1-21: changed w= from CollectionDate to WeekNumber bc we already specified stat wk in that column.
-  arrange(y, w) %>% mutate(sWeek = paste0(y, "_", w))
-
-# fallback - creating another data frame from pitData that has sums of reascends and total passes per statistical week. 
-fullRe <- pitData %>% 
+# REASCENSION - Use pitData_reasc (excludes adult-tagged fish)
+# Creating data frame with sums of reascends and total passes per statistical week
+fullRe <- pitData_reasc %>%
   group_by(stockGroup, sWeek) %>%
-  summarise(totalPass = length(TagID), numReascend = sum(laterAscend), .groups = "drop") %>% 
+  summarise(totalPass = length(TagID), numReascend = sum(laterAscend), .groups = "drop") %>%
   select(sWeek, stockGroup, numReascend, totalPass) #summing Trues in laterAscend; this df does not include all sweeks in the yr. only includes sweeks with PIT-tag detections
 
-fullNi <- pitData %>% 
-  group_by(sWeek) %>% 
+# NIGHT PASSAGE - Use pitData_night (includes all fish, even adult-tagged)
+# Creating data frame with night passage counts per statistical week
+fullNi <- pitData_night %>%
+  group_by(sWeek) %>%
   summarise(totalPass = length(TagID), nightPass = sum(Period == "N"), .groups = "drop") %>%
   select(sWeek, nightPass, totalPass)
 
