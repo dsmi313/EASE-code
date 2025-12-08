@@ -87,27 +87,35 @@ pitData_reasc <- read.csv('C:/Users/nicolette.beeken/OneDrive - State of Idaho/D
 #accounting for fallback withOUT reascension, this column could also
 #represent whether the PIT tag had previously ascended (TRUE) or not (FALSE)
 
-#Let's make sure the period column only includes D or N (no NAs) and laterAscend only includes TRUE or FALSE (no NAs).
-pitData_night %>% count(Period) #ok
-pitData_night %>% count(laterAscend)#ok
-pitData_reasc %>% count(Period) #ok
-pitData_reasc %>% count(laterAscend)#ok
+# Verify data quality
+pitData_night %>% count(Period) #Should only have D and N
+pitData_night %>% count(laterAscend) #Should only have TRUE and FALSE
+pitData_reasc %>% count(Period) #Should only have D and N
+pitData_reasc %>% count(laterAscend) #Should only have TRUE and FALSE
 
 # Process NIGHT PASSAGE data
 pitData_night <- pitData_night %>% mutate(Date = mdy(Date))
+
+# Rename WeekNum to sWeek (as required by EASE)
 colnames(pitData_night)[which(names(pitData_night) == "WeekNum")] <- "sWeek"
+
+# Create zero-padded sWeek column (YYYY_WW format)
 pitData_night <- pitData_night %>%
   mutate(y = year(Date), w = sWeek) %>%
   arrange(y, w) %>%
-  mutate(sWeek = paste0(y, "_", w))
+  mutate(sWeek = paste0(y, "_", sprintf("%02d", w)))
 
 # Process REASCENSION data
 pitData_reasc <- pitData_reasc %>% mutate(Date = mdy(Date))
+
+# Rename WeekNum to sWeek (as required by EASE)
 colnames(pitData_reasc)[which(names(pitData_reasc) == "WeekNum")] <- "sWeek"
+
+# Create zero-padded sWeek column (YYYY_WW format)
 pitData_reasc <- pitData_reasc %>%
   mutate(y = year(Date), w = sWeek) %>%
   arrange(y, w) %>%
-  mutate(sWeek = paste0(y, "_", w))
+  mutate(sWeek = paste0(y, "_", sprintf("%02d", w)))
 
 # REASCENSION - Use pitData_reasc (excludes adult-tagged fish)
 # Creating data frame with sums of reascends and total passes per statistical week
