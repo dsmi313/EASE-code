@@ -1,0 +1,652 @@
+# ESTIMATE ESCAPEMENT
+library(escapeLGD)
+library(tidyverse)
+library(beepr)
+
+# Set parameters
+numBoots <- 1000
+set.seed(7)
+alpha_ci <- 0.05  # 95% CI (use 0.1 for 90% CI)
+sy <- 2025
+spp <- "STHD"
+
+
+# Load inputs
+load("C:/Users/david.smith/OneDrive - State of Idaho/EASE CODE/SY2025 STHD/Final Inputs/escapeLGD_FINAL INPUTS_STHD_2025.rda")
+
+#________________________________________________________________________
+### 1) NIGHTTIME PASSAGE AND FALLBACK RATE (DO ONCE, APPLIES TO ALL RUNS)
+#Here we are estimating nighttime passage rates and fallback rates.
+#We are assuming that the rate of fallback withOUT reascension is 0.
+
+#__________________
+    #1A) INPUTS
+#The first dataset we need is counts of the number of PIT tags ascending in
+#each week and counts of how many of those PIT tags later fell back -
+#as determined by detection in the ladder during another ascension
+#(regardless of what week it was).
+
+# fullReComplete: tibble with four columns
+# sWeek: the statistical week
+# stockGroup: the group for which fallback and reascension is being estimated
+# numReascend: the number of PIT ascensions that later reascended (d_f)
+# totalPass: the total number of PIT ascensions (d_as)
+
+#Some important clarifying points:
+  #totalPass is the total number of PIT ascensions, NOT the total number of
+    #unique fish ascending. So if 5 fish were detected ascending once this week
+    #and one other fish was detected ascending 3 times this week,
+    #then totalPass would be 8 even though there were only 6 unique fish
+  #numReascend is the number of the ascensions in totalPass that
+    #later reascended, regardless of when they reascended. So,
+    #continuing the example from above, if the 6 fish were never detected again,
+    #then numReascend would be 2. If one of the fish was
+    #detected ascending again 6 weeks later, numReascend would be 3.
+
+# fullNiComplete: tibble with three columns
+# sWeek: the statistical week
+# nightPass: the number of PIT ascensions that were at night (d_n)
+# totalPass: the total number of PIT ascensions (d_a)
+
+# Verify that totalPass sums match
+sum(fullNiComplete$totalPass)  # Should equal fullReComplete
+sum(fullReComplete$totalPass)
+
+nf <- nightFall(full_reascend = fullReComplete, full_night = fullNiComplete,
+                stratAssign_fallback = stratFallback, stratAssign_night = stratNight,
+                full_spillway = NULL, boots = numBoots)
+
+# "full_spillway = NULL" assumes no fallback without reascension
+# (i.e., EVERY fish that falls back reascends)
+
+# What's in nf:
+# nf$fallback_rates[[1]] = point estimates (p_fa) of fallback rate for each stockGroup x stratum
+# nf$fallback_rates[[2]] = bootstrap estimates (columns = strata, rows = boot iterations)
+# nf$nightPassage_rates[[1]] = point estimates (p_night) of nighttime passage rate for each stratum
+# nf$nightPassage_rates[[2]] = bootstrap estimates (columns = strata, rows = boot iterations)
+
+#________________________________________________________________________
+### 2) TOTAL NUMBER OF ASCENSIONS (DO ONCE, APPLIES TO ALL RUNS)
+
+# We need to:
+# 1. Adjust for the proportion of time counting is performed during the day
+# 2. Add in nighttime passage using the rates estimated in step 1
+
+# wc: tibble with window counts by week (NOT expanded for counting time)
+# sWeek: the statistical week
+# wc: the number of fish counted that week
+
+# Check that composition strata are compatible with fallback strata
+# (Only one fallback stratum per comp stratum)
+checkStrata(stratAssign_comp = stratComp, stratAssign_fallback = stratFallback)
+
+exp_wc <- expand_wc_binom_night(nightPassage_rates = nf$nightPassage_rates, wc = wc,
+                                wc_prop = 5/6, stratAssign_comp = stratComp,
+                                stratAssign_night = stratNight, alpha_ci = alpha_ci, boots = numBoots)
+
+# Note: Use wc_prop = 1 for old SCOBI method; use 5/6 for EASE
+
+# What's in exp_wc:
+# exp_wc[[1]] = point estimates for total ascensions in each composition stratum
+# exp_wc[[2]] = bootstrap estimates (columns = strata, rows = boot iterations)
+# exp_wc[[3]] = overall nighttime passage rate with 95% CI for entire run
+
+overallNightPass <- exp_wc[[3]]
+
+#________________________________________________________________________
+### 3) RANDOMIZE GSI DRAWS (DO ONCE BEFORE FIRST RUN)
+
+# Randomize the order of GSI draws to incorporate GSI uncertainty
+# ONLY RUN THIS ONCE before the first run!
+gsi_draws_NA_probfish <- gsi_draws_NA_probfish[,c(1, sample(2:ncol(gsi_draws_NA_probfish),
+                                                            size = ncol(gsi_draws_NA_probfish) - 1, replace = FALSE))]
+
+# gsi_draws_NA_probfish structure:
+# First column = sample identifier (MasterID)
+# Other columns = GSI assignments (each column is one draw from posterior)
+# Fish not assessed for GSI or problem fish = "NA"
+
+#________________________________________________________________________
+#________________________________________________________________________
+# RUN 1 ----------------------------------------------------------------
+# W = Stock, Size; H = Release Group, Size; HNC = Release Group, Size
+# This run produces escapement by origin and size
+
+setwd("C:/Users/david.smith/OneDrive - State of Idaho/EASE CODE/SY2025 STHD/Output/Run1")
+
+RUN <- "RUN_1"
+w <- c("GenStock", "lenCat")  # Wild: estimate by stock, then size within stock
+h <- c("releaseGroup", "lenCat")  # Ad-clipped hatchery: estimate by release group, then size
+hnc <- c("releaseGroup", "lenCat")  # Ad-intact hatchery: estimate by release group, then size
+
+# trap data needs these columns:
+# MasterID: sample ID matching gsi_draws_NA_probfish
+# releaseGroup: PBT assignments ("Unassigned" or "NA")
+# sWeek: statistical week
+# physTag: TRUE/FALSE for physical tag presence
+# LGDMarkAD: "AD" or "AI" (no other values allowed)
+# Plus any variables you're estimating (GenStock, lenCat, Age, swAge, BY, GenSex)
+
+# tagRates: tibble with release group names and tag rates (must be > 0 and <= 1)
+
+# Estimate composition (~40 min with 1000 bootstraps)
+est_comp1 <- HNC_expand_unkGSI(trap = trap, stratAssign_comp = stratComp,
+                               boots = numBoots,
+                               pbt_var = "releaseGroup", timestep_var = "sWeek",
+                               physTag_var = "physTag", adclip_var = "LGDMarkAD",
+                               sampID = "MasterID", tagRates = tagRates,
+                               H_vars = h, HNC_vars = hnc, W_vars = w,
+                               wc_binom = exp_wc, GSI_draws = gsi_draws_NA_probfish,
+                               n_point = ceiling(.1 * numBoots), GSI_var = "GenStock",
+                               method = "MLE")
+
+# n_point = number of GSI draws to use for point estimate (recommend 100 for 1000 boots)
+# method options: "MLE" or "Acc" (accounting method)
+# Alternative functions: HNC_expand (treats GSI as fixed), ascension_composition (old SCOBI method)
+
+# You may get warnings about non-convergence of MLE estimator
+# This is normal if < 1% of (numBoots * number of strata) iterations
+# If many warnings, check data inputs or try accounting method
+
+beep(sound = 8)
+save(est_comp1, file = "SY2025STHD_est_comp_RUN1.RData")
+write.csv(est_comp1[[1]], 'SY2025STHD_est_comp1_RUN1.csv', row.names = F)
+write.csv(est_comp1[[2]], 'SY2025STHD_est_comp2_boots_RUN1.csv', row.names = F)
+
+# What's in est_comp1:
+# est_comp1[[1]] = point estimates for ascensions by stratum and category (rear, var1, var2)
+#                  Rows with NA for var2 = totals for var1 category
+# est_comp1[[2]] = bootstrap estimates for ascensions
+
+#________________________________________________________________________
+### 4) AMBIGUOUS PBT GROUPS (FOR STHD ONLY)
+#Some steelhead PBT groups released by OR and/or WA are
+#ambiguous with respect to which fallback rate should be applied.
+#We can use PIT tag data to split these into upper and lower stocks.
+
+#__________________
+#4A) INPUTS
+
+# sthd_splitPITdata: tibble where each row represents a PIT tag release group
+# (a group of fish with one PIT tag rate) with five columns:
+  #releaseGroupPBT: this is the name of the PBT group the fish belong to.
+    #This should match the name in est_comp.
+  #stockGroup: the stock group that this PIT tag release group represents.
+    #This should match the name in nf[[1]].
+  #releaseGroupPIT: this is for your use keeping track of the
+    #PIT tag release groups, it is ignored by the function.
+  #detectPIT: this is the number of PIT tags detected at
+    #Lower Granite Dam for this group (e.g., d_A d_A)
+  #tagRatePIT: this is the tag rate of that PIT tag group (e.g., t_A t_A)
+
+#__________________
+#4B) ESTIMATES
+
+#Now we split the groups as necessary:
+split_est_comp1 <- splitByPIT(est_comp1, sthd_splitPITdata)
+
+#The output has the same structure as est_comp.
+#All the entries have now been split,
+#and the new names are "old_name" + "_" + stockGroup.
+#In this case, the stockGroups are "upper" and "lower".
+#The bootstrap estimates have also been split.
+
+#There's no reason to save the old est_comp unless you want to do
+#something particular with it. Here we just saved it to allow us to
+#examine the change. So to reduce memory use, we will overwrite it:
+est_comp1 <- split_est_comp1
+rm(split_est_comp1)
+
+#________________________________________________________________________
+### 5) APPLYING FALLBACK RATES TO ESTIMATES
+
+# Create templates for fallback rate assignment
+templates1 <- apply_fallback_rates(breakdown = est_comp1, fallback_rates = nf$fallback_rates,
+                                  split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                  H_groups = NULL, HNC_groups = NULL, W_groups = NULL,
+                                  stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                  alpha_ci = alpha_ci, output_type = "summary")
+
+# split_*_fallback tells which variable ("var1", "var2", or "both") determines fallback rate
+# Passing NULL to H_groups, HNC_groups, W_groups returns templates to fill in
+
+#FOR STHD: stock groups assigned based on data from sthd_splitPITdata and sthd_stockGroup objects:
+# HNC (Hatchery ad-intact fish)
+templates1$HNC <- templates1$HNC %>% select(-stockGroup) %>%
+  left_join(sthd_stockGroup, by = c("var1" = "releaseGroup"))
+# assigning the groups created by splitByPIT
+templates1$HNC <- templates1$HNC %>%
+  mutate(stockGroup = ifelse(is.na(stockGroup) & grepl("_lower$", var1), "lower",
+                             ifelse(is.na(stockGroup) & grepl("_upper$", var1), "upper", stockGroup)))
+
+# H (Hatchery ad-clipped fish)
+templates1$H <- templates1$H %>% select(-stockGroup) %>%
+  left_join(sthd_stockGroup, by = c("var1" = "releaseGroup"))
+# assigning the groups created by splitByPIT
+templates1$H <- templates1$H %>%
+  mutate(stockGroup = ifelse(is.na(stockGroup) & grepl("_lower$", var1), "lower",
+                             ifelse(is.na(stockGroup) & grepl("_upper$", var1), "upper", stockGroup)))
+
+#And for the W fish (wild origin), only the "LSNAKE" stock is "lower":
+templates1$W$stockGroup <- ifelse(templates1$W$var1 == "LSNAKE", "lower", "upper")
+
+# Verify stockGroup assignments are valid
+for(i in 1:3) {
+  templates1[[i]] %>% count(stockGroup) %>% print
+}
+
+# Apply fallback rates to get escapement estimates
+est_escp1 <- apply_fallback_rates(breakdown = est_comp1, fallback_rates = nf$fallback_rates,
+                                  split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                  H_groups = templates1$H, HNC_groups = templates1$HNC, W_groups = templates1$W,
+                                  stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                  alpha_ci = alpha_ci, output_type = "summary")
+
+# What's in est_escp1:
+# est_escp1$output = escapement estimates and CIs for all groups (rear, var1, var2)
+# est_escp1$rearType = total escapement within the three rear types
+
+est_escp_rearType1 <- est_escp1$rearType
+
+# Get full output with bootstrap and stratum breakdown
+full_est_escp1 <- apply_fallback_rates(breakdown = est_comp1, fallback_rates = nf$fallback_rates,
+                                       split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                       H_groups = templates1$H, HNC_groups = templates1$HNC, W_groups = templates1$W,
+                                       stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                       alpha_ci = alpha_ci, output_type = "full")
+
+# What's in full_est_escp1:
+# $output = same as est_escp1$output
+# $full_breakdown_H/HNC/W = point estimates by strata
+# $boot_breakdown_H/HNC/W = estimates by strata for each bootstrap iteration
+
+# Calculate marginal totals for var2 (size classes across all stocks)
+marginal_var2_1 <- full_est_escp1$output %>%
+  filter(!is.na(var2)) %>% group_by(rear, var2) %>%
+  summarise(pointEst = sum(pointEst), .groups = "drop_last") %>%
+  left_join(
+    bind_rows(full_est_escp1$boot_breakdown_H, full_est_escp1$boot_breakdown_HNC, full_est_escp1$boot_breakdown_W) %>%
+      filter(!is.na(var2)) %>% group_by(rear, var2, boot) %>% summarise(total = sum(total), .groups = "drop_last") %>%
+      summarise(lci = quantile(total, alpha_ci / 2), uci = quantile(total, 1 - (alpha_ci / 2)), .groups = "drop_last"),
+    by = c("rear", "var2"))
+
+# RUN 1 - Round estimates to whole fish
+full_est_escp1$output <- full_est_escp1$output %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+marginal_var2_1 <- marginal_var2_1 %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+est_escp_rearType1 <- est_escp_rearType1 %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+
+# Save RUN 1 outputs
+write.csv(full_est_escp1$output, "SY2025STHD_full_est_escp_SUMMARY_OUTPUT_RUN_1.csv", row.names = F)
+write.csv(marginal_var2_1, "SY2025STHD_marginal_var2_SUMMARY_OUTPUT_RUN_1.csv", row.names = F)
+write.csv(est_escp_rearType1, "SY2025STHD_rearType_SUMMARY_OUTPUT_RUN_1.csv", row.names = F)
+
+# Save RUN 1 workspace objects
+save(est_comp1, templates1, est_escp1, full_est_escp1, est_escp_rearType1, marginal_var2_1,
+     file = "SY2025STHD_ANALYSIS_RUN_1_numBoots1000.rda")
+
+# RUN 2 ----------------------------------------------------------------
+# W = Stock, Age; H = Release Group; HNC = Release Group
+# This run produces wild fish by stock and age class
+
+setwd("C:/Users/david.smith/OneDrive - State of Idaho/EASE CODE/SY2025 STHD/Output/Run2")
+
+RUN <- "RUN_2"
+w <- c("GenStock", "Age")  # Wild: estimate by stock, then total age within stock
+h <- c("releaseGroup")     # Ad-clipped hatchery: estimate by release group
+hnc <- c("releaseGroup")   # Ad-intact hatchery: estimate by release group
+
+# Estimate composition (~45 min with 1000 bootstraps)
+est_comp2 <- HNC_expand_unkGSI(trap = trap, stratAssign_comp = stratComp,
+                               boots = numBoots,
+                               pbt_var = "releaseGroup", timestep_var = "sWeek",
+                               physTag_var = "physTag", adclip_var = "LGDMarkAD",
+                               sampID = "MasterID", tagRates = tagRates,
+                               H_vars = h, HNC_vars = hnc, W_vars = w,
+                               wc_binom = exp_wc, GSI_draws = gsi_draws_NA_probfish,
+                               n_point = ceiling(.1 * numBoots), GSI_var = "GenStock",
+                               method = "MLE")
+
+beep(sound = 8)
+save(est_comp2, file = "SY2025STHD_est_comp_RUN2.RData")
+write.csv(est_comp2[[1]], 'SY2025STHD_est_comp1_RUN2.csv', row.names = F)
+write.csv(est_comp2[[2]], 'SY2025STHD_est_comp2_boots_RUN2.csv', row.names = F)
+
+# Split ambiguous PBT groups
+split_est_comp2 <- splitByPIT(est_comp2, sthd_splitPITdata)
+est_comp2 <- split_est_comp2
+rm(split_est_comp2)
+
+templates2 <- apply_fallback_rates(breakdown = est_comp2, fallback_rates = nf$fallback_rates,
+                                   split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                   H_groups = NULL, HNC_groups = NULL, W_groups = NULL,
+                                   stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                   alpha_ci = alpha_ci, output_type = "summary")
+
+templates2$HNC <- templates2$HNC %>% select(-stockGroup) %>%
+  left_join(sthd_stockGroup, by = c("var1" = "releaseGroup")) %>%
+  mutate(stockGroup = ifelse(is.na(stockGroup) & grepl("_lower$", var1), "lower",
+                             ifelse(is.na(stockGroup) & grepl("_upper$", var1), "upper", stockGroup)))
+
+templates2$H <- templates2$H %>% select(-stockGroup) %>%
+  left_join(sthd_stockGroup, by = c("var1" = "releaseGroup")) %>%
+  mutate(stockGroup = ifelse(is.na(stockGroup) & grepl("_lower$", var1), "lower",
+                             ifelse(is.na(stockGroup) & grepl("_upper$", var1), "upper", stockGroup)))
+
+templates2$W$stockGroup <- ifelse(templates2$W$var1 == "LSNAKE", "lower", "upper")
+
+est_escp2 <- apply_fallback_rates(breakdown = est_comp2, fallback_rates = nf$fallback_rates,
+                                  split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                  H_groups = templates2$H, HNC_groups = templates2$HNC, W_groups = templates2$W,
+                                  stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                  alpha_ci = alpha_ci, output_type = "summary")
+
+est_escp_rearType2 <- est_escp2$rearType
+
+full_est_escp2 <- apply_fallback_rates(breakdown = est_comp2, fallback_rates = nf$fallback_rates,
+                                       split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                       H_groups = templates2$H, HNC_groups = templates2$HNC, W_groups = templates2$W,
+                                       stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                       alpha_ci = alpha_ci, output_type = "full")
+
+marginal_var2_2 <- full_est_escp2$output %>%
+  filter(!is.na(var2)) %>% group_by(rear, var2) %>%
+  summarise(pointEst = sum(pointEst), .groups = "drop_last") %>%
+  left_join(
+    bind_rows(full_est_escp2$boot_breakdown_H, full_est_escp2$boot_breakdown_HNC, full_est_escp2$boot_breakdown_W) %>%
+      filter(!is.na(var2)) %>% group_by(rear, var2, boot) %>% summarise(total = sum(total), .groups = "drop_last") %>%
+      summarise(lci = quantile(total, alpha_ci / 2), uci = quantile(total, 1 - (alpha_ci / 2)), .groups = "drop_last"),
+    by = c("rear", "var2"))
+
+# RUN 2 - Round estimates to whole fish
+full_est_escp2$output <- full_est_escp2$output %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+marginal_var2_2 <- marginal_var2_2 %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+est_escp_rearType2 <- est_escp_rearType2 %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+
+write.csv(full_est_escp2$output, "SY2025STHD_full_est_escp_SUMMARY_OUTPUT_RUN_2.csv", row.names = F)
+write.csv(marginal_var2_2, "SY2025STHD_marginal_var2_SUMMARY_OUTPUT_RUN_2.csv", row.names = F)
+write.csv(est_escp_rearType2, "SY2025STHD_rearType_SUMMARY_OUTPUT_RUN_2.csv", row.names = F)
+
+# Save RUN 2 workspace objects
+save(est_comp2, templates2, est_escp2, full_est_escp2, est_escp_rearType2, marginal_var2_2,
+     file = "SY2025STHD_ANALYSIS_RUN_2_numBoots1000.rda")
+
+# RUN 3 ----------------------------------------------------------------
+# W = Stock, Saltwater Age; H = Release Group; HNC = Release Group
+# This run produces wild fish by saltwater age
+
+setwd("C:/Users/david.smith/OneDrive - State of Idaho/EASE CODE/SY2025 STHD/Output/Run3")
+
+RUN <- "RUN_3"
+w <- c("GenStock", "swAge")  # Wild: estimate by stock, then saltwater age within stock
+h <- c("releaseGroup")
+hnc <- c("releaseGroup")
+
+# Estimate composition (~25 min with 1000 bootstraps)
+est_comp3 <- HNC_expand_unkGSI(trap = trap, stratAssign_comp = stratComp,
+                               boots = numBoots,
+                               pbt_var = "releaseGroup", timestep_var = "sWeek",
+                               physTag_var = "physTag", adclip_var = "LGDMarkAD",
+                               sampID = "MasterID", tagRates = tagRates,
+                               H_vars = h, HNC_vars = hnc, W_vars = w,
+                               wc_binom = exp_wc, GSI_draws = gsi_draws_NA_probfish,
+                               n_point = ceiling(.1 * numBoots), GSI_var = "GenStock",
+                               method = "MLE")
+
+beep(sound = 8)
+save(est_comp3, file = "SY2025STHD_est_comp_RUN3.RData")
+write.csv(est_comp3[[1]], 'SY2025STHD_est_comp1_RUN3.csv', row.names = F)
+write.csv(est_comp3[[2]], 'SY2025STHD_est_comp2_boots_RUN3.csv', row.names = F)
+
+# Split ambiguous PBT groups
+split_est_comp3 <- splitByPIT(est_comp3, sthd_splitPITdata)
+est_comp3 <- split_est_comp3
+rm(split_est_comp3)
+
+templates3 <- apply_fallback_rates(breakdown = est_comp3, fallback_rates = nf$fallback_rates,
+                                   split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                   H_groups = NULL, HNC_groups = NULL, W_groups = NULL,
+                                   stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                   alpha_ci = alpha_ci, output_type = "summary")
+
+templates3$HNC <- templates3$HNC %>% select(-stockGroup) %>%
+  left_join(sthd_stockGroup, by = c("var1" = "releaseGroup")) %>%
+  mutate(stockGroup = ifelse(is.na(stockGroup) & grepl("_lower$", var1), "lower",
+                             ifelse(is.na(stockGroup) & grepl("_upper$", var1), "upper", stockGroup)))
+
+templates3$H <- templates3$H %>% select(-stockGroup) %>%
+  left_join(sthd_stockGroup, by = c("var1" = "releaseGroup")) %>%
+  mutate(stockGroup = ifelse(is.na(stockGroup) & grepl("_lower$", var1), "lower",
+                             ifelse(is.na(stockGroup) & grepl("_upper$", var1), "upper", stockGroup)))
+
+templates3$W$stockGroup <- ifelse(templates3$W$var1 == "LSNAKE", "lower", "upper")
+
+est_escp3 <- apply_fallback_rates(breakdown = est_comp3, fallback_rates = nf$fallback_rates,
+                                  split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                  H_groups = templates3$H, HNC_groups = templates3$HNC, W_groups = templates3$W,
+                                  stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                  alpha_ci = alpha_ci, output_type = "summary")
+
+est_escp_rearType3 <- est_escp3$rearType
+
+full_est_escp3 <- apply_fallback_rates(breakdown = est_comp3, fallback_rates = nf$fallback_rates,
+                                       split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                       H_groups = templates3$H, HNC_groups = templates3$HNC, W_groups = templates3$W,
+                                       stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                       alpha_ci = alpha_ci, output_type = "full")
+
+marginal_var2_3 <- full_est_escp3$output %>%
+  filter(!is.na(var2)) %>% group_by(rear, var2) %>%
+  summarise(pointEst = sum(pointEst), .groups = "drop_last") %>%
+  left_join(
+    bind_rows(full_est_escp3$boot_breakdown_H, full_est_escp3$boot_breakdown_HNC, full_est_escp3$boot_breakdown_W) %>%
+      filter(!is.na(var2)) %>% group_by(rear, var2, boot) %>% summarise(total = sum(total), .groups = "drop_last") %>%
+      summarise(lci = quantile(total, alpha_ci / 2), uci = quantile(total, 1 - (alpha_ci / 2)), .groups = "drop_last"),
+    by = c("rear", "var2"))
+
+# RUN 3 - Round estimates to whole fish
+full_est_escp3$output <- full_est_escp3$output %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+marginal_var2_3 <- marginal_var2_3 %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+est_escp_rearType3 <- est_escp_rearType3 %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+
+write.csv(full_est_escp3$output, "SY2025STHD_full_est_escp_SUMMARY_OUTPUT_RUN_3.csv", row.names = F)
+write.csv(marginal_var2_3, "SY2025STHD_marginal_var2_SUMMARY_OUTPUT_RUN_3.csv", row.names = F)
+write.csv(est_escp_rearType3, "SY2025STHD_rearType_SUMMARY_OUTPUT_RUN_3.csv", row.names = F)
+
+# Save RUN 3 workspace objects
+save(est_comp3, templates3, est_escp3, full_est_escp3, est_escp_rearType3, marginal_var2_3,
+     file = "SY2025STHD_ANALYSIS_RUN_3_numBoots1000.rda")
+
+# RUN 4 ----------------------------------------------------------------
+# W = Stock, Brood Year; H = Release Group; HNC = Release Group
+# This run produces wild fish by brood year
+
+setwd("C:/Users/david.smith/OneDrive - State of Idaho/EASE CODE/SY2025 STHD/Output/Run4")
+
+RUN <- "RUN_4"
+w <- c("GenStock", "BY")  # Wild: estimate stock, then brood year
+h <- c("releaseGroup")    # Hatchery: estimate by release group
+hnc <- c("releaseGroup")  # HNC: estimate by release group
+
+# Estimate composition (~20 min with 1000 bootstraps)
+est_comp4 <- HNC_expand_unkGSI(trap = trap, stratAssign_comp = stratComp,
+                               boots = numBoots,
+                               pbt_var = "releaseGroup", timestep_var = "sWeek",
+                               physTag_var = "physTag", adclip_var = "LGDMarkAD",
+                               sampID = "MasterID", tagRates = tagRates,
+                               H_vars = h, HNC_vars = hnc, W_vars = w,
+                               wc_binom = exp_wc, GSI_draws = gsi_draws_NA_probfish,
+                               n_point = ceiling(.1 * numBoots), GSI_var = "GenStock",
+                               method = "MLE")
+
+beep(sound = 8)
+save(est_comp4, file = "SY2025STHD_est_comp_RUN4.RData")
+write.csv(est_comp4[[1]], 'SY2025STHD_est_comp1_RUN4.csv', row.names = F)
+write.csv(est_comp4[[2]], 'SY2025STHD_est_comp2_boots_RUN4.csv', row.names = F)
+
+# Split ambiguous PBT groups
+split_est_comp4 <- splitByPIT(est_comp4, sthd_splitPITdata)
+est_comp4 <- split_est_comp4
+rm(split_est_comp4)
+
+templates4 <- apply_fallback_rates(breakdown = est_comp4, fallback_rates = nf$fallback_rates,
+                                   split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                   H_groups = NULL, HNC_groups = NULL, W_groups = NULL,
+                                   stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                   alpha_ci = alpha_ci, output_type = "summary")
+
+templates4$HNC <- templates4$HNC %>% select(-stockGroup) %>%
+  left_join(sthd_stockGroup, by = c("var1" = "releaseGroup")) %>%
+  mutate(stockGroup = ifelse(is.na(stockGroup) & grepl("_lower$", var1), "lower",
+                             ifelse(is.na(stockGroup) & grepl("_upper$", var1), "upper", stockGroup)))
+
+templates4$H <- templates4$H %>% select(-stockGroup) %>%
+  left_join(sthd_stockGroup, by = c("var1" = "releaseGroup")) %>%
+  mutate(stockGroup = ifelse(is.na(stockGroup) & grepl("_lower$", var1), "lower",
+                             ifelse(is.na(stockGroup) & grepl("_upper$", var1), "upper", stockGroup)))
+
+templates4$W$stockGroup <- ifelse(templates4$W$var1 == "LSNAKE", "lower", "upper")
+
+est_escp4 <- apply_fallback_rates(breakdown = est_comp4, fallback_rates = nf$fallback_rates,
+                                  split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                  H_groups = templates4$H, HNC_groups = templates4$HNC, W_groups = templates4$W,
+                                  stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                  alpha_ci = alpha_ci, output_type = "summary")
+
+est_escp_rearType4 <- est_escp4$rearType
+
+full_est_escp4 <- apply_fallback_rates(breakdown = est_comp4, fallback_rates = nf$fallback_rates,
+                                       split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                       H_groups = templates4$H, HNC_groups = templates4$HNC, W_groups = templates4$W,
+                                       stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                       alpha_ci = alpha_ci, output_type = "full")
+
+marginal_var2_4 <- full_est_escp4$output %>%
+  filter(!is.na(var2)) %>% group_by(rear, var2) %>%
+  summarise(pointEst = sum(pointEst), .groups = "drop_last") %>%
+  left_join(
+    bind_rows(full_est_escp4$boot_breakdown_H, full_est_escp4$boot_breakdown_HNC, full_est_escp4$boot_breakdown_W) %>%
+      filter(!is.na(var2)) %>% group_by(rear, var2, boot) %>% summarise(total = sum(total), .groups = "drop_last") %>%
+      summarise(lci = quantile(total, alpha_ci / 2), uci = quantile(total, 1 - (alpha_ci / 2)), .groups = "drop_last"),
+    by = c("rear", "var2"))
+
+# RUN 4 - Round estimates to whole fish
+full_est_escp4$output <- full_est_escp4$output %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+marginal_var2_4 <- marginal_var2_4 %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+est_escp_rearType4 <- est_escp_rearType4 %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+
+write.csv(full_est_escp4$output, "SY2025STHD_full_est_escp_SUMMARY_OUTPUT_RUN_4.csv", row.names = F)
+write.csv(marginal_var2_4, "SY2025STHD_marginal_var2_SUMMARY_OUTPUT_RUN_4.csv", row.names = F)
+write.csv(est_escp_rearType4, "SY2025STHD_rearType_SUMMARY_OUTPUT_RUN_4.csv", row.names = F)
+
+# Save RUN 4 workspace objects
+save(est_comp4, templates4, est_escp4, full_est_escp4, est_escp_rearType4, marginal_var2_4,
+     file = "SY2025STHD_ANALYSIS_RUN_4_numBoots1000.rda")
+
+# RUN 5 ----------------------------------------------------------------
+# W = Stock, Sex; H = Release Group; HNC = Release Group
+# This run produces wild fish by sex
+
+setwd("C:/Users/david.smith/OneDrive - State of Idaho/EASE CODE/SY2025 STHD/Output/Run5")
+
+RUN <- "RUN_5"
+w <- c("GenStock", "GenSex")  # Wild: estimate by stock, then sex within stock
+h <- c("releaseGroup")
+hnc <- c("releaseGroup")
+
+# Estimate composition (~40 min with 1000 bootstraps)
+est_comp5 <- HNC_expand_unkGSI(trap = trap, stratAssign_comp = stratComp,
+                               boots = numBoots,
+                               pbt_var = "releaseGroup", timestep_var = "sWeek",
+                               physTag_var = "physTag", adclip_var = "LGDMarkAD",
+                               sampID = "MasterID", tagRates = tagRates,
+                               H_vars = h, HNC_vars = hnc, W_vars = w,
+                               wc_binom = exp_wc, GSI_draws = gsi_draws_NA_probfish,
+                               n_point = ceiling(.1 * numBoots), GSI_var = "GenStock",
+                               method = "MLE")
+
+beep(sound = 8)
+save(est_comp5, file = "SY2025STHD_est_comp_RUN5.RData")
+write.csv(est_comp5[[1]], 'SY2025STHD_est_comp1_RUN5.csv', row.names = F)
+write.csv(est_comp5[[2]], 'SY2025STHD_est_comp2_boots_RUN5.csv', row.names = F)
+
+# Split ambiguous PBT groups
+split_est_comp5 <- splitByPIT(est_comp5, sthd_splitPITdata)
+est_comp5 <- split_est_comp5
+rm(split_est_comp5)
+
+templates5 <- apply_fallback_rates(breakdown = est_comp5, fallback_rates = nf$fallback_rates,
+                                   split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                   H_groups = NULL, HNC_groups = NULL, W_groups = NULL,
+                                   stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                   alpha_ci = alpha_ci, output_type = "summary")
+
+templates5$HNC <- templates5$HNC %>% select(-stockGroup) %>%
+  left_join(sthd_stockGroup, by = c("var1" = "releaseGroup")) %>%
+  mutate(stockGroup = ifelse(is.na(stockGroup) & grepl("_lower$", var1), "lower",
+                             ifelse(is.na(stockGroup) & grepl("_upper$", var1), "upper", stockGroup)))
+
+templates5$H <- templates5$H %>% select(-stockGroup) %>%
+  left_join(sthd_stockGroup, by = c("var1" = "releaseGroup")) %>%
+  mutate(stockGroup = ifelse(is.na(stockGroup) & grepl("_lower$", var1), "lower",
+                             ifelse(is.na(stockGroup) & grepl("_upper$", var1), "upper", stockGroup)))
+
+templates5$W$stockGroup <- ifelse(templates5$W$var1 == "LSNAKE", "lower", "upper")
+
+est_escp5 <- apply_fallback_rates(breakdown = est_comp5, fallback_rates = nf$fallback_rates,
+                                  split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                  H_groups = templates5$H, HNC_groups = templates5$HNC, W_groups = templates5$W,
+                                  stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                  alpha_ci = alpha_ci, output_type = "summary")
+
+est_escp_rearType5 <- est_escp5$rearType
+
+full_est_escp5 <- apply_fallback_rates(breakdown = est_comp5, fallback_rates = nf$fallback_rates,
+                                       split_H_fallback = "var1", split_HNC_fallback = "var1", split_W_fallback = "var1",
+                                       H_groups = templates5$H, HNC_groups = templates5$HNC, W_groups = templates5$W,
+                                       stratAssign_fallback = stratFallback, stratAssign_comp = stratComp,
+                                       alpha_ci = alpha_ci, output_type = "full")
+
+marginal_var2_5 <- full_est_escp5$output %>%
+  filter(!is.na(var2)) %>% group_by(rear, var2) %>%
+  summarise(pointEst = sum(pointEst), .groups = "drop_last") %>%
+  left_join(
+    bind_rows(full_est_escp5$boot_breakdown_H, full_est_escp5$boot_breakdown_HNC, full_est_escp5$boot_breakdown_W) %>%
+      filter(!is.na(var2)) %>% group_by(rear, var2, boot) %>% summarise(total = sum(total), .groups = "drop_last") %>%
+      summarise(lci = quantile(total, alpha_ci / 2), uci = quantile(total, 1 - (alpha_ci / 2)), .groups = "drop_last"),
+    by = c("rear", "var2"))
+
+# RUN 5 - Round estimates to whole fish
+full_est_escp5$output <- full_est_escp5$output %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+marginal_var2_5 <- marginal_var2_5 %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+est_escp_rearType5 <- est_escp_rearType5 %>% mutate(across(where(is.numeric), \(x) round(x, 0)))
+
+write.csv(full_est_escp5$output, "SY2025STHD_full_est_escp_SUMMARY_OUTPUT_RUN_5.csv", row.names = F)
+write.csv(marginal_var2_5, "SY2025STHD_marginal_var2_SUMMARY_OUTPUT_RUN_5.csv", row.names = F)
+write.csv(est_escp_rearType5, "SY2025STHD_rearType_SUMMARY_OUTPUT_RUN_5.csv", row.names = F)
+
+# Save RUN 5 workspace objects
+save(est_comp5, templates5, est_escp5, full_est_escp5, est_escp_rearType5, marginal_var2_5,
+     file = "SY2025STHD_ANALYSIS_RUN_5_numBoots1000.rda")
+
+#________________________________________________________________________
+# TOTAL RUN TIME: Approximately 2.5-3 hours for all 5 runs with 1000 bootstraps
+#________________________________________________________________________
+
+#________________________________________________________________________
+# ADDITIONAL NOTES FOR REPORT GENERATION
+
+# Sample sizes for report tables:
+# Use this code to get sample sizes by category for the report
+# Exclude problem fish (duplicates or incomplete cases)
+# Filter trap data by rear type and count by desired variables
+
+# Example for wild fish by stock and size:
+# Samp_sizes <- trap %>%
+#   mutate(rear = ifelse(LGDMarkAD == "AD", "H",
+#                       ifelse(physTag | (!is.na(releaseGroup) & releaseGroup != "Unassigned"), "HNC",
+#                             ifelse(is.na(releaseGroup), NA, "W")))) %>%
+#   filter(!is.na(rear), rear == 'W') %>%
+#   count(var1 = GenStock, var2 = lenCat)
+
+# Figure creation will require additional plotting code
+# Table formatting will require combining outputs from multiple runs
