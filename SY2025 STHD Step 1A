@@ -24,7 +24,7 @@ options(dplyr.summarise.inform = FALSE)
 
 #### Set working directory. This is where the formatted .csv file will save to.
 ```{r setup}
-knitr::opts_knit$set(root.dir = normalizePath("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs"))
+knitr::opts_knit$set(root.dir = normalizePath("C:/Users/david.smith/OneDrive - State of Idaho/EASE CODE/SY2025 STHD/Final Inputs"))
 ```
 getwd()
 #### Set species (STHD or CHNK) and spawn year of interest. Species must be STHD or CHNK and must be surrounded by quotation marks. Spawn year must be a valid year, integer, with no quotes.
@@ -322,7 +322,23 @@ FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>%
   mutate(swAge2 = case_when(grepl("\\?|N", BioScaleFinalAge2) ~ NA_character_,
                            str_sub(BioScaleFinalAge2, str_locate(FormattedLGTrappingRecords$BioScaleFinalAge2, ":")[,1] +1, str_length(BioScaleFinalAge2)) == "MJ" ~ "0",
                            TRUE ~ str_sub(BioScaleFinalAge2, str_locate(BioScaleFinalAge2, ":")[,1] +1, str_length(BioScaleFinalAge2))))
-#could delete MJ part since that applies to CHNK
+
+# Identify fish with uncertain ages (for tracking only)
+# Ages with "?" are automatically converted to NA by age parsing code above
+uncertain_age_fish <- FormattedLGTrappingRecords %>%
+  filter(!is.na(BioScaleFinalAge2) & str_detect(BioScaleFinalAge2, "\\?")) %>%
+  group_by(Rear2) %>%
+  summarise(n = n(), .groups = "drop")
+
+# Print breakdown by rear type
+cat("\nFish with uncertain ages (?) in BioScaleFinalAge2 by rear type:\n")
+print(uncertain_age_fish)
+cat("\nTotal fish with uncertain ages:", sum(uncertain_age_fish$n), "\n")
+cat("  - Wild fish (used in EASE):",
+    ifelse("W" %in% uncertain_age_fish$Rear2,
+           uncertain_age_fish$n[uncertain_age_fish$Rear2 == "W"], 0), "\n")
+cat("\nNote: These ages already converted to NA by grepl() checks in fwAge2/swAge2 code\n")
+cat("      Fish remain in dataset for GSI stock composition\n")
 
 FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>% 
   mutate(Age2 = if_else(!is.na(fwAge2), paste0("F", fwAge2, "S", swAge2), NA_character_))
@@ -373,37 +389,6 @@ Step 3: If a 'S' or 'R' is present in BioScaleFinalAge2 col, check that swAge2 c
 Step 4: Total fish is = between datasets
 #can write code to sum NA's in formatted data
 
-### Remove fish with uncertain ages
-Fish with uncertain ages (containing "?" in fw or sw age) are removed from the dataset to ensure age calculations are reliable.
-```{r}
-# Count fish before removing uncertain ages
-n_before <- nrow(FormattedLGTrappingRecords)
-
-# Identify fish with uncertain ages by Rear type (important for EASE analysis)
-uncertain_age_fish <- FormattedLGTrappingRecords %>%
-  filter(!is.na(BioScaleFinalAge2) & str_detect(BioScaleFinalAge2, "\\?")) %>%
-  group_by(Rear2) %>%
-  summarise(n = n(), .groups = "drop")
-
-# Print breakdown by rear type
-cat("\nFish with uncertain ages (?) by rear type:\n")
-print(uncertain_age_fish)
-cat("\nTotal fish with uncertain ages:", sum(uncertain_age_fish$n), "\n")
-cat("  - Wild fish (used in EASE):",
-    ifelse("W" %in% uncertain_age_fish$Rear2,
-           uncertain_age_fish$n[uncertain_age_fish$Rear2 == "W"], 0), "\n")
-
-# Remove fish with uncertain ages (containing "?" in BioScaleFinalAge2)
-FormattedLGTrappingRecords <- FormattedLGTrappingRecords %>%
-  filter(is.na(BioScaleFinalAge2) | !str_detect(BioScaleFinalAge2, "\\?"))
-
-# Count fish after removal
-n_after <- nrow(FormattedLGTrappingRecords)
-n_removed_uncertain_age <- n_before - n_after
-
-# Print summary
-cat("\nFish remaining in dataset:", n_after, "\n")
-```
 
 - ReleaseGroup2: Calculated from Rear2, PBTBYHat2 and PBTRGroup2. The goal here is to remove PBTRGroup from both wild fish and fish without a PBTBYHat designation, call "Unassigned" fish "Unassigned" (we don't want fish that could not be genotyped to hatchery), and finally preserve the RGroup if none of the above is true. In other words, We set release group of hatchery fish to NA when PBTBYHat is NA and set their release group to unassigned when PBTBYHat is unassigned. 
 
@@ -575,7 +560,6 @@ write.csv(trap,"SY2025STHD_trap.csv")
 
 ##Check tht species and time period correct. Convert CollectionDate into readable date format. Corey's RMD file checks this in original data but good to check here on formatted data
 table(trap$LGDSpecies) # all 3 (STHD) so good
-#trap<-trap %>% mutate(CollectionDate = mdy(CollectionDate)) ##done in coreys script?
 summary(trap$CollectionDate) #STHD run period is 7/1 of previous SY to 6/30 of current SY, good
 ##CMB 10-1-21: was throwing an error, so changed ymd() to mdy() to match inputs at top of page.
 
@@ -591,57 +575,61 @@ trap %>% count(LGDMarkAD)
 #check out the sample sizes that will be used in the decomposition estimates for wild fish:
 #first, how many fish have a GenStock assignment in the trap data (TRUE = have a value, FALSE = no value). check that they sum to total.
 trap %>% count(!is.na(GenStock))
-#   !is.na(GenStock) n
-#1            FALSE 9754
-#2             TRUE 1546
+#  !is.na(GenStock)     n
+#1            FALSE 16598
+#2             TRUE  1918
 
 #look at each of the secondary variables (aka how many fish have a GenStock AND this other variable). Check that they sum to total.
 trap %>% count(!is.na(GenStock), !is.na(GenSex))
-#!is.na(GenStock) !is.na(GenSex)    n
-#1            FALSE          FALSE 6596
-#2            FALSE           TRUE 3158
-#3             TRUE           TRUE 1546; so all fish assigned to GenStock also assigned to sex
+#  !is.na(GenStock) !is.na(GenSex)     n
+#1            FALSE          FALSE 13519
+#2            FALSE           TRUE  3079
+#3             TRUE           TRUE  1918
+#so all fish assigned to GenStock also assigned to sex
 
 #Size. Check that they sum to toal
 trap %>% count(!is.na(GenStock), !is.na(lenCat))
-#!is.na(GenStock) !is.na(lenCat)    n
-#1            FALSE           TRUE 9754
-#2             TRUE           TRUE 1546; 1546 fish have GenStock, sex, and lencat
+#  !is.na(GenStock) !is.na(lenCat)     n
+#1            FALSE           TRUE 16598
+#2             TRUE           TRUE  1918
+#1918 fish have GenStock, sex, and lencat
 
 #Check that they sum to total
 trap %>% count(!is.na(GenStock), !is.na(Age))
-#!is.na(GenStock) !is.na(Age)    n
-#1            FALSE       FALSE 9735
-#2            FALSE        TRUE   19
-#3             TRUE       FALSE  178 #these fish can cause problems during EASE modeling
-#4             TRUE        TRUE 1368 #1368 with both GenStock and Age, expected to be lower because there are less fish that get assigned an age compared to a sex.
+#  !is.na(GenStock) !is.na(Age)     n
+#1            FALSE       FALSE 16574
+#2            FALSE        TRUE    24
+#3             TRUE       FALSE   106 #these fish can cause problems in EASE
+#4             TRUE        TRUE  1812
+
+#1812 with both GenStock and Age, expected to be lower because there are less fish that get assigned an age compared to a sex.
 
 #Since the age categories are linked, the number of fish that have a 1) GenStock and swAge and 2) GenStock and Brood Year should be the same as the # of fish that have Genstock and Age. Check that they sum to total.
 trap %>% count(!is.na(GenStock), !is.na(swAge))
-#!is.na(GenStock) !is.na(swAge)    n
-#1            FALSE         FALSE 9735
-#2            FALSE          TRUE   19
-#3             TRUE         FALSE  178
-#4             TRUE          TRUE 1368
+#  !is.na(GenStock) !is.na(swAge)     n
+#1            FALSE         FALSE 16574
+#2            FALSE          TRUE    24
+#3             TRUE         FALSE   106
+#4             TRUE          TRUE  1812
 
 #Check that they sum to total.
 trap %>% count(!is.na(GenStock), !is.na(BY))
-#!is.na(GenStock) !is.na(BY)    n
-#1            FALSE      FALSE 9735
-#2            FALSE       TRUE   19
-#3             TRUE      FALSE  178
-#4             TRUE       TRUE 1368
+#  !is.na(GenStock) !is.na(BY)     n
+#1            FALSE      FALSE 16574
+#2            FALSE       TRUE    24
+#3             TRUE      FALSE   106
+#4             TRUE       TRUE  1812
 
 
 #and if we want to see the number of fish that have ALL of these variables (TRUE = has it, FALSE = doesn't have it). Check that they sum to total
 trap %>% count(!is.na(GenStock), !is.na(Age), !is.na(swAge), !is.na(BY), !is.na(LGDFLmm), !is.na(GenSex)) 
-#!is.na(GenStock) !is.na(Age) !is.na(swAge) !is.na(BY) !is.na(LGDFLmm) !is.na(GenSex)    n
-#1            FALSE       FALSE         FALSE      FALSE            TRUE          FALSE 6577
-#2            FALSE       FALSE         FALSE      FALSE            TRUE           TRUE 3158
-#3            FALSE        TRUE          TRUE       TRUE            TRUE          FALSE   19
-#4             TRUE       FALSE         FALSE      FALSE            TRUE           TRUE  178
-#5             TRUE        TRUE          TRUE       TRUE            TRUE           TRUE 1368
-#^ the last line of the above output shows that in the trap dataset we have 1368 wild fish that have ALL of the required variables (TRUE): a GenStock, an Age, a swAge, a Brood Year, a Length, and a Sex.
+#  !is.na(GenStock) !is.na(Age) !is.na(swAge) !is.na(BY) !is.na(LGDFLmm) !is.na(GenSex)     n
+#1            FALSE       FALSE         FALSE      FALSE            TRUE          FALSE 13495
+#2            FALSE       FALSE         FALSE      FALSE            TRUE           TRUE  3079
+#3            FALSE        TRUE          TRUE       TRUE            TRUE          FALSE    24
+#4             TRUE       FALSE         FALSE      FALSE            TRUE           TRUE   106
+#5             TRUE        TRUE          TRUE       TRUE            TRUE           TRUE  1812
+#^ the last line of the above output shows that in the trap dataset we have 1812 wild fish that have ALL of the required variables (TRUE): a GenStock, an Age, a swAge, a Brood Year, a Length, and a Sex.
 
 write.csv(trap, paste0("SY", sy, spp, "_trap.csv"), row.names = F)
 ## Run getwd(). This is where the .csv saved to.
