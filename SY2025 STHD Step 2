@@ -735,7 +735,7 @@ trap_scobi <- trap_clean %>%
     LGDSpecies, LGDFLmm, SRR, LGDMarkAD, physTag, GenMa, GenPa,
     PBTBYHat, PBTRGroup, Rear, GenSex, GenStock, MPG,
     BioScaleFinalAge, fwAge, swAge, Age, totalAge, BY,
-    GenPBT_ByHatGenPBT_RGroup, lenCat, LGDTagsAll, PtagisFlags
+    GenPBT_ByHatGenPBT_RGroup, lenCat, LGDTagsAll, PtagisFlags, LGDMarksAll 
   )
 
 write.csv(trap_scobi, "SY2025STHD_trap_forSCOBI.csv", row.names = FALSE)
