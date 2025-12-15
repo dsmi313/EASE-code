@@ -74,7 +74,7 @@ write.csv(COEWindowCounts, 'SY2025STHD.dates.with.weekNums.csv',row.names = F)
 #Add link for FPC DB and could query it from R
 
 # Replace the filepath in quotes with the filepath for the FPC query file. 
-FPCWindowCounts <- read_csv("C:/Users/david.smith/OneDrive - State of Idaho/Desktop/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD.FPC.WindowCounts.csv", 
+FPCWindowCounts <- read_csv("C:/Users/david.smith/OneDrive - State of Idaho/EASE CODE/SY2025 STHD/Final Inputs/SY2025STHD.FPC.WindowCounts.csv", 
                             col_types = cols(Date = col_date(format = "%m/%d/%Y"))) # reformats the Date column to be readable by R; warning ok just referring to text in last couple rows
 
 # Join the window counts from the LGTrapping database and the FPC. Add a field to check that daily totals match.
@@ -97,6 +97,8 @@ COEWindowCounts.by.wk <- COEWindowCounts %>%
   group_by(y = year(Date), w = weekNum) %>% summarise(wc = sum(win_cnt), .groups = "drop") %>%
   arrange(y, w) %>% mutate(sWeek = paste0(y, "_", w)) %>% select(sWeek, wc) #creating a statistical week column "sWeek" from the Date and weekNum columns. summed correctly (use Excel)
 
+COEWindowCounts %>%as_tibble()%>% print(n=nrow(COEWindowCounts))
+COEWindowCounts.by.wk%>%print(n=nrow(COEWindowCounts.by.wk))
 #SAVE AN EXPANDED VERSION IF ANYONE NEEDS IT:
 write.csv(COEWindowCounts.by.wk, 'SY2025STHD_wc_expanded.csv', row.names=F) #window counts are expanded in FPC and LGTrap databases to account for 10 min of each hr that fish are not counted. Export expanded version before it's un-expanded and to have as a comparison btw expanded vs un-expanded 
 
